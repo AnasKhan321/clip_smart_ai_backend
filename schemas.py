@@ -1,0 +1,74 @@
+from datetime import datetime
+from typing import Optional, List
+from pydantic import BaseModel
+
+
+class ClipOut(BaseModel):
+    id: str
+    job_id: str
+    rank: int
+    start_seconds: float
+    end_seconds: float
+    duration_seconds: float
+    clip_type: str
+    score: float
+    reason: str
+    transcript_excerpt: str
+    hook_line: Optional[str] = None
+    tags: Optional[str] = None
+    status: str
+    raw_clip_path: Optional[str] = None
+    final_clip_path: Optional[str] = None
+    user_start_seconds: Optional[float] = None
+    user_end_seconds: Optional[float] = None
+    user_approved: bool
+    user_notes: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class JobOut(BaseModel):
+    job_id: str
+    status: str
+    stage_progress: int
+    source_url: Optional[str] = None
+    source_filename: Optional[str] = None
+    source_type: str
+    detected_language: Optional[str] = None
+    detected_topic: Optional[str] = None
+    video_duration_seconds: Optional[float] = None
+    video_title: Optional[str] = None
+    error_message: Optional[str] = None
+    clips: List[ClipOut] = []
+    created_at: datetime
+    completed_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class JobCreate(BaseModel):
+    source_url: Optional[str] = None
+    max_clips: int = 5
+    clip_types: List[str] = ["controversy", "hook_intro", "quotable", "shocking_stat", "myth_bust"]
+    min_clip_duration: int = 20
+    max_clip_duration: int = 90
+    target_aspect_ratio: str = "9:16"
+
+
+class ClipUpdate(BaseModel):
+    user_start_seconds: Optional[float] = None
+    user_end_seconds: Optional[float] = None
+    user_approved: Optional[bool] = None
+    user_notes: Optional[str] = None
+
+
+class ExportRequest(BaseModel):
+    aspect_ratio: str = "9:16"
+    caption_style: str = "word_highlight"
+    caption_language: Optional[str] = None
+    include_captions: bool = True
+    output_format: str = "mp4"
+    focus_mode: str = "none"  # none | speaker | center
