@@ -14,14 +14,12 @@ from api.debug import router as debug_router
 load_dotenv()
 
 CORS_ORIGINS = [
-    origin.strip()
-    for origin in os.getenv(
-        "CORS_ORIGINS",
-        "http://localhost:5173,http://127.0.0.1:5173",
-    ).split(",")
-    if origin.strip()
+"http://localhost:5173",
+"http://127.0.0.1:5173",
+"https://clip-smart-ai-frontend-kappa.vercel.app"
 ]
 
+print(f"CORS_ORIGINS: {CORS_ORIGINS}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
