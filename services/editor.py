@@ -2,9 +2,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-
-# Full-featured ffmpeg with libass (subtitle burning support)
-_FFMPEG = os.path.expanduser("~/bin/ffmpeg-libass")
+from services.media_tools import ffmpeg_path, ffprobe_path
 
 # Production encode settings: CRF 18, yuv420p for broad compatibility
 _VID_OPTS = ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p"]
@@ -32,7 +30,7 @@ def render_clip(job_id: str, clip: dict, aspect_ratio: str = "9:16", focus_mode:
 
     # Input seek for speed, re-encode for frame-accurate cut (no blank frames)
     subprocess.run(
-        [_FFMPEG, "-y", "-ss", str(start), "-i", source, "-t", str(end - start)]
+        [ffmpeg_path(), "-y", "-ss", str(start), "-i", source, "-t", str(end - start)]
         + _VID_OPTS + _AUD_OPTS + [raw_path],
         check=True,
         capture_output=True,
@@ -64,7 +62,7 @@ def _apply_vertical_crop(input_path: str, output_path: str):
         "[blurred][scaled]overlay=(W-w)/2:(H-h)/2[out]"
     )
     subprocess.run(
-        [_FFMPEG, "-y", "-i", input_path,
+        [ffmpeg_path(), "-y", "-i", input_path,
          "-filter_complex", filter_complex,
          "-map", "[out]", "-map", "0:a?"]
         + _VID_OPTS + _AUD_OPTS + [output_path],
@@ -79,7 +77,7 @@ def _apply_center_crop(input_path: str, output_path: str, ar_w: int, ar_h: int):
         f"scale=1080:1920"
     )
     subprocess.run(
-        [_FFMPEG, "-y", "-i", input_path, "-vf", vf]
+        [ffmpeg_path(), "-y", "-i", input_path, "-vf", vf]
         + _VID_OPTS + _AUD_OPTS + [output_path],
         check=True, capture_output=True,
     )
@@ -101,7 +99,7 @@ def _apply_focused_vertical_crop(job_id: str, clip: dict, input_path: str, outpu
     # Probe cut clip dims
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+            [ffprobe_path(), "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", input_path],
             capture_output=True, text=True, check=True,
         )
@@ -121,7 +119,7 @@ def _apply_focused_vertical_crop(job_id: str, clip: dict, input_path: str, outpu
     )
     try:
         subprocess.run(
-            [_FFMPEG, "-y", "-i", input_path,
+            [ffmpeg_path(), "-y", "-i", input_path,
              "-filter_complex", fc,
              "-map", "[out]", "-map", "0:a?"]
             + _VID_OPTS + _AUD_OPTS + [output_path],
@@ -144,7 +142,7 @@ def _apply_square_crop(input_path: str, output_path: str):
         "crop=1080:1080"
     )
     subprocess.run(
-        [_FFMPEG, "-y", "-i", input_path, "-vf", vf]
+        [ffmpeg_path(), "-y", "-i", input_path, "-vf", vf]
         + _VID_OPTS + _AUD_OPTS + [output_path],
         check=True,
         capture_output=True,
@@ -177,7 +175,7 @@ def burn_captions(clip: dict, transcript: dict, input_path: str, output_path: st
 
     escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:")
     subprocess.run(
-        [_FFMPEG, "-y", "-i", input_path, "-vf", f"ass={escaped}"]
+        [ffmpeg_path(require_libass=True), "-y", "-i", input_path, "-vf", f"ass={escaped}"]
         + _VID_OPTS + _AUD_OPTS + [output_path],
         check=True,
         capture_output=True,

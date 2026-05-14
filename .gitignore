@@ -1,0 +1,73 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Virtual environments
+myenv/
+venv/
+.venv/
+env/
+ENV/
+
+# Python cache and bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+
+# Test, coverage, and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Build and packaging artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+pip-wheel-metadata/
+
+# Runtime data
+storage/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+
+# Generated media and transcripts
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.mp3
+*.m4a
+*.wav
+*.ass
+*.srt
+transcript.json
+diarization.json
+focus_track.json
+
+# Logs and process files
+*.log
+logs/
+celerybeat-schedule
+celerybeat.pid
+*.pid
+
+# Local editor and OS noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Docker/local temporary files
+.dockerignore.local
+tmp/
+temp/

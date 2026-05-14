@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,8 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 # ── Schemas ──────────────────────────────────────────────────
 class AdminUserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     email: str
     name: Optional[str]
@@ -29,9 +31,6 @@ class AdminUserOut(BaseModel):
     created_at: datetime
     last_login_at: Optional[datetime]
     job_count: int
-
-    class Config:
-        from_attributes = True
 
 
 class GrantCreditsIn(BaseModel):
@@ -47,6 +46,8 @@ class GrantCreditsOut(BaseModel):
 
 
 class CreditTxnOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     user_id: str
     user_email: Optional[str]
@@ -57,11 +58,10 @@ class CreditTxnOut(BaseModel):
     note: Optional[str]
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class AdminLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     actor_email: str
     action: str
@@ -70,9 +70,6 @@ class AdminLogOut(BaseModel):
     target_email: Optional[str]
     payload: Optional[str]
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class StatsOut(BaseModel):

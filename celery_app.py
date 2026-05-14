@@ -1,10 +1,22 @@
 import os
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from celery import Celery
 from dotenv import load_dotenv
 
 load_dotenv()
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
+def normalize_redis_url(url: str) -> str:
+    if not url.startswith("rediss://"):
+        return url
+
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.setdefault("ssl_cert_reqs", "CERT_NONE")
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+REDIS_URL = normalize_redis_url(os.getenv("REDIS_URL", "redis://localhost:6379/0"))
 
 celery = Celery(
     "clipforge",

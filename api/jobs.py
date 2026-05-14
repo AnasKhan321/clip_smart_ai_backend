@@ -1,4 +1,5 @@
 import os
+import logging
 from threading import Thread
 from uuid import uuid4
 from typing import Optional
@@ -11,8 +12,19 @@ from schemas import JobOut, JobCreate, ClipOut
 from tasks.pipeline import run_full_pipeline, run_more_clips
 from auth import get_current_user
 from services.credits import deduct, cost_for_job
+from services.media_tools import MediaToolMissingError, ffmpeg_path, ffprobe_path
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+
+def run_task_in_background(task, *args):
+    if os.getenv("RUN_JOBS_INLINE", "false").lower() in ("1", "true", "yes", "on"):
+        Thread(target=lambda: task.apply(args=args, throw=True), daemon=True).start()
+        return {"mode": "inline"}
+
+    async_result = task.delay(*args)
+    return {"mode": "celery", "task_id": async_result.id}
 
 
 @router.post("/jobs")
@@ -29,6 +41,12 @@ async def create_job(
 ):
     if not source_url and not file:
         raise HTTPException(status_code=400, detail="Provide either source_url or upload a file")
+
+    try:
+        ffmpeg_path()
+        ffprobe_path()
+    except MediaToolMissingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     # Charge credits upfront. Raises 402 if insufficient (no-op in dev).
     cost = cost_for_job(max_clips)
@@ -76,14 +94,21 @@ async def create_job(
         "target_aspect_ratio": target_aspect_ratio,
     }
 
-    run_full_pipeline.delay(job_id, options)
+    try:
+        dispatch = run_task_in_background(run_full_pipeline, job_id, options)
+    except Exception as exc:
+        logger.exception("Failed to dispatch job %s", job_id)
+        job.status = "failed"
+        job.error_message = f"Failed to dispatch job: {exc}"
+        db.commit()
+        raise HTTPException(status_code=503, detail=job.error_message) from exc
 
     return {
         "job_id": job_id,
         "status": "pending",
+        "dispatch": dispatch,
         "message": f"Job queued. Poll /api/jobs/{job_id} for progress.",
     }
-
 
 @router.get("/jobs", response_model=list[JobOut])
 def list_jobs(
@@ -177,8 +202,8 @@ def more_clips(
     job.error_message = None
     db.commit()
 
-    run_more_clips.delay(job_id, options, excluded)
-    return {"job_id": job_id, "status": "analyzing", "excluded_clips": len(excluded)}
+    dispatch = run_task_in_background(run_more_clips, job_id, options, excluded)
+    return {"job_id": job_id, "status": "analyzing", "excluded_clips": len(excluded), "dispatch": dispatch}
 
 
 class ManualClipIn(BaseModel):

@@ -8,8 +8,8 @@ import os
 import subprocess
 from pathlib import Path
 from typing import List, Optional
+from services.media_tools import ffmpeg_path, ffprobe_path
 
-_FFMPEG = os.path.expanduser("~/bin/ffmpeg-libass")
 _SAMPLE_FPS = 2.0
 _EMA_ALPHA = 0.18
 
@@ -58,7 +58,7 @@ def compute_focus_track(job_id: str, progress_callback=None) -> List[dict]:
 
     # Extract sampled frames once.
     subprocess.run(
-        [_FFMPEG, "-y", "-i", str(source), "-vf", f"fps={_SAMPLE_FPS},scale=480:-2",
+        [ffmpeg_path(), "-y", "-i", str(source), "-vf", f"fps={_SAMPLE_FPS},scale=480:-2",
          "-q:v", "4", pattern],
         check=True, capture_output=True,
     )
@@ -268,12 +268,9 @@ def _save_track(job_id: str, track: List[dict]):
 
 def _probe_video(path: str):
     """Return (width, height, duration_seconds)."""
-    ffprobe = _FFMPEG.replace("ffmpeg-libass", "ffprobe")
-    if not Path(ffprobe).exists():
-        ffprobe = "ffprobe"
     try:
         result = subprocess.run(
-            [ffprobe, "-v", "error", "-select_streams", "v:0",
+            [ffprobe_path(), "-v", "error", "-select_streams", "v:0",
              "-show_entries", "stream=width,height,duration",
              "-of", "json", path],
             capture_output=True, text=True, check=True,

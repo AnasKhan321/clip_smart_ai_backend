@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -38,6 +38,8 @@ class GoogleSignInIn(BaseModel):
 
 
 class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     email: str
     name: Optional[str]
@@ -46,9 +48,6 @@ class UserOut(BaseModel):
     credits: int
     is_admin: bool
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 class AuthOut(BaseModel):

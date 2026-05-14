@@ -30,7 +30,13 @@ def transcribe(job_id: str, language: str = None, progress_callback=None) -> dic
 # ── Local (whisper) ──────────────────────────────────────────────────────────
 
 def _transcribe_local(job_id: str, language: str = None, progress_callback=None) -> dict:
-    import whisper
+    try:
+        import whisper
+    except ImportError as exc:
+        raise RuntimeError(
+            "TRANSCRIPTION_PROVIDER=local requires openai-whisper. "
+            "Install it with `pip install openai-whisper` or set TRANSCRIPTION_PROVIDER=assemblyai/openai."
+        ) from exc
 
     storage = os.getenv("STORAGE_PATH", "./storage")
     audio_path = Path(storage) / "jobs" / job_id / "audio.wav"
@@ -156,7 +162,13 @@ def _transcribe_openai(job_id: str, language: str = None, progress_callback=None
 # ── AssemblyAI ───────────────────────────────────────────────────────────────
 
 def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=None) -> dict:
-    import assemblyai as aai
+    try:
+        import assemblyai as aai
+    except ImportError as exc:
+        raise RuntimeError(
+            "TRANSCRIPTION_PROVIDER=assemblyai requires the assemblyai package. "
+            "Install it with `pip install assemblyai` or rebuild the Docker image after updating requirements.txt."
+        ) from exc
 
     storage = os.getenv("STORAGE_PATH", "./storage")
     audio_path = Path(storage) / "jobs" / job_id / "audio.wav"
@@ -166,7 +178,10 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
     if not audio_path.exists():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
-    aai.settings.api_key = os.getenv("ASSEMBLYAI_API_KEY")
+    api_key = os.getenv("ASSEMBLYAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("ASSEMBLYAI_API_KEY is required when TRANSCRIPTION_PROVIDER=assemblyai")
+    aai.settings.api_key = api_key
 
     if progress_callback:
         progress_callback(10)

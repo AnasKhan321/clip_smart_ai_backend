@@ -5,6 +5,7 @@ import time
 import subprocess
 import yt_dlp
 from pathlib import Path
+from services.media_tools import ffmpeg_path, ffprobe_path
 
 # Ensure Homebrew Node.js is on PATH so yt-dlp-ejs can solve n-challenge
 _homebrew_bin = "/opt/homebrew/bin"
@@ -184,7 +185,7 @@ def _find_video_file(job_dir: Path):
 
 def _extract_audio(video_path: str, audio_path: str):
     subprocess.run(
-        ["ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path],
+        [ffmpeg_path(), "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path],
         check=True,
         capture_output=True,
     )
@@ -192,7 +193,7 @@ def _extract_audio(video_path: str, audio_path: str):
 
 def _get_duration(video_path: str) -> float:
     result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", video_path],
+        [ffprobe_path(), "-v", "quiet", "-print_format", "json", "-show_format", video_path],
         capture_output=True,
         text=True,
         check=True,

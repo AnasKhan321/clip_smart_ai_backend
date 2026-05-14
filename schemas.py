@@ -1,9 +1,11 @@
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class ClipOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: str
     job_id: str
     rank: int
@@ -25,11 +27,10 @@ class ClipOut(BaseModel):
     user_notes: Optional[str] = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
-
 
 class JobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     job_id: str
     status: str
     stage_progress: int
@@ -44,9 +45,6 @@ class JobOut(BaseModel):
     clips: List[ClipOut] = []
     created_at: datetime
     completed_at: Optional[datetime] = None
-
-    class Config:
-        from_attributes = True
 
 
 class JobCreate(BaseModel):
