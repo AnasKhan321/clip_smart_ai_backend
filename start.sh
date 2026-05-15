@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 # Multi-process launcher for single-container Railway deploys.
 #
 # Starts the Celery worker in the background and uvicorn in the foreground.
