@@ -1,9 +1,13 @@
 import os
 import json
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 from pathlib import Path
 from services.transcriber import load_transcript
 from services.diarizer import load_diarization, build_enriched_transcript
+
+logger = logging.getLogger(__name__)
 
 
 CHUNK_WINDOW_SECONDS = 1200  # 20-minute windows keep each prompt under ~30k tokens
@@ -60,32 +64,18 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
     if progress_callback:
         progress_callback(10)
 
-    all_candidates: list = []
-    for i, chunk in enumerate(chunks):
-        prompt = _build_prompt(transcript, chunk, options)
-        response = client.chat.completions.create(
-            model="anthropic/claude-sonnet-4-5",
-            max_tokens=4000,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        all_candidates.extend(_parse_clips(response.choices[0].message.content.strip()))
-        if progress_callback:
-            progress_callback(10 + int((i + 1) / len(chunks) * 70))
-
+    all_candidates = _analyze_chunks_parallel(client, transcript, chunks, options,
+                                              progress_callback, base_progress=10,
+                                              span=70)
     all_candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
     clips = _deduplicate(all_candidates, max_clips, pre_selected=pre_selected or [])
 
     if not clips:
         options_relaxed = {**options, "_relaxed": True}
-        all_relaxed: list = []
-        for chunk in chunks:
-            prompt = _build_prompt(transcript, chunk, options_relaxed)
-            response = client.chat.completions.create(
-                model="anthropic/claude-sonnet-4-5",
-                max_tokens=4000,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            all_relaxed.extend(_parse_clips(response.choices[0].message.content.strip()))
+        all_relaxed = _analyze_chunks_parallel(
+            client, transcript, chunks, options_relaxed,
+            progress_callback, base_progress=80, span=15,
+        )
         all_relaxed.sort(key=lambda c: c.get("score", 0), reverse=True)
         clips = _deduplicate(all_relaxed, max_clips, pre_selected=pre_selected or [])
         for c in clips:
@@ -95,6 +85,42 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
         c["rank"] = i + 1
 
     return clips
+
+
+def _llm_call(client: OpenAI, transcript: dict, chunk: list, options: dict) -> list:
+    """Single chunk → list of candidate dicts. Returns [] on failure."""
+    prompt = _build_prompt(transcript, chunk, options)
+    try:
+        response = client.chat.completions.create(
+            model="anthropic/claude-sonnet-4-5",
+            max_tokens=4000,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return _parse_clips(response.choices[0].message.content.strip())
+    except Exception as exc:
+        logger.warning("OpenRouter chunk call failed: %s", exc)
+        return []
+
+
+def _analyze_chunks_parallel(client: OpenAI, transcript: dict, chunks: list,
+                              options: dict, progress_callback, base_progress: int,
+                              span: int) -> list:
+    """Dispatch all chunks in parallel via thread pool. Aggregates results."""
+    if not chunks:
+        return []
+    workers = min(len(chunks), int(os.getenv("ANALYZER_CHUNK_WORKERS", "3")))
+    candidates: list = []
+    completed = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_llm_call, client, transcript, chunk, options)
+                   for chunk in chunks]
+        from concurrent.futures import as_completed as _as_completed
+        for fut in _as_completed(futures):
+            candidates.extend(fut.result())
+            completed += 1
+            if progress_callback:
+                progress_callback(base_progress + int(completed / len(chunks) * span))
+    return candidates
 
 
 def _chunk_enriched(enriched: list, window_seconds: int = 1200) -> list:

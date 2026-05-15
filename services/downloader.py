@@ -186,11 +186,47 @@ def _find_video_file(job_dir: Path):
 
 
 def _extract_audio(video_path: str, audio_path: str):
-    subprocess.run(
-        [ffmpeg_path(), "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path],
-        check=True,
-        capture_output=True,
-    )
+    # Validate input before invoking ffmpeg — empty/missing file is the most
+    # common cause of exit 234 (EINVAL) on deployment.
+    p = Path(video_path)
+    if not p.exists():
+        raise RuntimeError(f"Audio extraction: input file missing at {video_path}")
+    size = p.stat().st_size
+    if size < 1024:
+        raise RuntimeError(
+            f"Audio extraction: input file too small ({size} bytes) at {video_path}. "
+            "Download likely failed or produced an empty file."
+        )
+
+    # Probe streams — fail fast with a clear message if there's no audio track.
+    try:
+        probe = subprocess.run(
+            [ffprobe_path(), "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        if "audio" not in probe.stdout:
+            raise RuntimeError(
+                f"Audio extraction: source video has no audio stream ({video_path})"
+            )
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or "").strip()[-300:]
+        raise RuntimeError(f"Audio extraction: ffprobe failed: {stderr}") from e
+
+    try:
+        subprocess.run(
+            [ffmpeg_path(), "-y", "-i", video_path,
+             "-vn",                  # ignore video stream
+             "-ar", "16000", "-ac", "1", "-f", "wav", audio_path],
+            check=True, capture_output=True, timeout=600,
+        )
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", errors="ignore").strip()[-500:]
+        raise RuntimeError(
+            f"Audio extraction failed (ffmpeg exit {e.returncode}): {stderr}"
+        ) from e
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Audio extraction timed out (>10min)")
 
 
 def _get_duration(video_path: str) -> float:

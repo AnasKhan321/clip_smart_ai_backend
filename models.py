@@ -81,6 +81,8 @@ class Job(Base):
     detected_topic = Column(String, nullable=True)
     video_duration_seconds = Column(Float, nullable=True)
     video_title = Column(String, nullable=True)
+    source_width = Column(Integer, nullable=True)
+    source_height = Column(Integer, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)
@@ -121,6 +123,8 @@ class Clip(Base):
     user_notes = Column(String, nullable=True)
 
     rank = Column(Integer)
+
+    error_message = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
 

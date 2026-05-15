@@ -1,12 +1,30 @@
+"""Unified single-pass clip renderer.
+
+The previous pipeline encoded each clip three times sequentially:
+    raw extract  →  aspect transform  →  caption burn
+This module collapses those into ONE ffmpeg invocation per clip via
+filter_complex chains, and selects an H.264 hardware encoder when one is
+available (VideoToolbox / NVENC / QSV / AMF) with libx264 as fallback.
+
+Public API:
+    render_and_caption_clip(...)  — single-pass producer of final .mp4
+    burn_captions(...)            — legacy wrapper kept for export path
+
+Returns dicts with explicit "error" keys so callers can mark DB rows
+"failed" instead of swallowing exceptions.
+"""
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from services.media_tools import ffmpeg_path, ffprobe_path
+from typing import Optional
 
-# Production encode settings: CRF 18, yuv420p for broad compatibility
-_VID_OPTS = ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-threads", "1"]
-_AUD_OPTS = ["-c:a", "aac", "-b:a", "192k"]
+from services.media_tools import (
+    ffmpeg_path,
+    ffprobe_path,
+    encoder_video_opts,
+    encoder_audio_opts,
+)
 
 
 def get_clips_dir(job_id: str) -> Path:
@@ -16,170 +34,76 @@ def get_clips_dir(job_id: str) -> Path:
     return p
 
 
-def render_clip(job_id: str, clip: dict, aspect_ratio: str = "9:16", focus_mode: str = "none") -> dict:
-    storage = os.getenv("STORAGE_PATH", "./storage")
-    source = str(Path(storage) / "jobs" / job_id / "original.mp4")
-    clips_dir = get_clips_dir(job_id)
+# ── Source dimensions cache helper ──────────────────────────────────────────
 
-    rank = clip.get("rank", 1)
-    raw_path = str(clips_dir / f"clip_{rank:03d}_raw.mp4")
-    final_path = str(clips_dir / f"clip_{rank:03d}_final.mp4")
-
-    start = clip.get("user_start_seconds") or clip["start_seconds"]
-    end = clip.get("user_end_seconds") or clip["end_seconds"]
-
-    # Input seek for speed, re-encode for frame-accurate cut (no blank frames)
-    subprocess.run(
-        [ffmpeg_path(), "-y", "-ss", str(start), "-i", source, "-t", str(end - start)]
-        + _VID_OPTS + _AUD_OPTS + [raw_path],
-        check=True,
-        capture_output=True,
+def probe_source_dims(source_path: str) -> tuple[int, int]:
+    """Return (width, height) of a video file via ffprobe."""
+    result = subprocess.run(
+        [ffprobe_path(), "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height",
+         "-of", "csv=p=0:s=x", source_path],
+        capture_output=True, text=True, check=True,
     )
+    w, h = result.stdout.strip().split("x")
+    return int(w), int(h)
 
+
+# ── Filter chain builder ────────────────────────────────────────────────────
+
+def _build_video_filter(
+    aspect_ratio: str,
+    focus_mode: str,
+    focus_crop_expr: Optional[dict],
+    captions_ass_path: Optional[str],
+) -> str:
+    """Build a single -filter_complex string ending at [out]."""
+    # Stage 1: aspect transform → [composed]
     if aspect_ratio == "9:16":
-        if focus_mode == "speaker":
-            ok = _apply_focused_vertical_crop(job_id, clip, raw_path, final_path, start, end)
-            if not ok:
-                _apply_vertical_crop(raw_path, final_path)
+        if focus_mode == "speaker" and focus_crop_expr:
+            chain = (
+                f"[0:v]crop={focus_crop_expr['cw']}:{focus_crop_expr['ch']}:"
+                f"{focus_crop_expr['x']}:{focus_crop_expr['y']},"
+                f"scale=1080:1920[composed]"
+            )
         elif focus_mode == "center":
-            _apply_center_crop(raw_path, final_path, 9, 16)
+            chain = (
+                "[0:v]scale=iw:ih,"
+                "crop='min(iw,ih*9/16)':'min(ih,iw*16/9)',"
+                "scale=1080:1920[composed]"
+            )
         else:
-            _apply_vertical_crop(raw_path, final_path)
+            # Default 9:16: blurred background + scaled foreground overlay
+            chain = (
+                "[0:v]split=2[bg][fg];"
+                "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
+                "crop=1080:1920,boxblur=10:2[blurred];"
+                "[fg]scale=1080:-2[scaled];"
+                "[blurred][scaled]overlay=(W-w)/2:(H-h)/2[composed]"
+            )
     elif aspect_ratio == "1:1":
-        _apply_square_crop(raw_path, final_path)
+        chain = (
+            "[0:v]scale=1080:1080:force_original_aspect_ratio=increase,"
+            "crop=1080:1080[composed]"
+        )
     else:
-        shutil.copy(raw_path, final_path)
+        # Native / 16:9: just normalize to 1080p height
+        chain = "[0:v]scale=-2:1080[composed]"
 
-    return {"raw_clip_path": raw_path, "final_clip_path": final_path}
+    # Stage 2: caption burn → [out]
+    if captions_ass_path:
+        escaped = captions_ass_path.replace("\\", "\\\\").replace(":", "\\:")
+        chain += f";[composed]ass={escaped}[out]"
+    else:
+        # Rename [composed] → [out] so the -map target is consistent
+        chain = chain[::-1].replace("[composed]"[::-1], "[out]"[::-1], 1)[::-1]
 
-
-def _apply_vertical_crop(input_path: str, output_path: str):
-    filter_complex = (
-        "[0:v]split=2[bg][fg];"
-        "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=10:2[blurred];"
-        "[fg]scale=1080:-2[scaled];"
-        "[blurred][scaled]overlay=(W-w)/2:(H-h)/2[out]"
-    )
-    subprocess.run(
-        [ffmpeg_path(), "-y", "-i", input_path,
-         "-filter_complex", filter_complex,
-         "-map", "[out]", "-map", "0:a?"]
-        + _VID_OPTS + _AUD_OPTS + [output_path],
-        check=True,
-        capture_output=True,
-    )
+    return chain
 
 
-def _apply_center_crop(input_path: str, output_path: str, ar_w: int, ar_h: int):
-    vf = (
-        f"scale=iw:ih,crop='min(iw,ih*{ar_w}/{ar_h})':'min(ih,iw*{ar_h}/{ar_w})',"
-        f"scale=1080:1920"
-    )
-    subprocess.run(
-        [ffmpeg_path(), "-y", "-i", input_path, "-vf", vf]
-        + _VID_OPTS + _AUD_OPTS + [output_path],
-        check=True, capture_output=True,
-    )
+# ── ASS subtitle generation (unchanged caption layer) ───────────────────────
 
-
-def _apply_focused_vertical_crop(job_id: str, clip: dict, input_path: str, output_path: str,
-                                  src_start: float, src_end: float) -> bool:
-    """Crop 9:16 around active speaker via precomputed focus_track. Returns False on failure."""
-    from services.speaker_focus import load_focus_track, slice_track, build_crop_expression
-
-    track = load_focus_track(job_id)
-    if not track:
-        return False
-
-    clip_track = slice_track(track, src_start, src_end)
-    if not clip_track:
-        return False
-
-    # Probe cut clip dims
-    try:
-        result = subprocess.run(
-            [ffprobe_path(), "-v", "error", "-select_streams", "v:0",
-             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", input_path],
-            capture_output=True, text=True, check=True,
-        )
-        w, h = [int(x) for x in result.stdout.strip().split("x")]
-    except Exception:
-        return False
-
-    expr = build_crop_expression(clip_track, w, h, 9, 16)
-    if not expr:
-        return False
-
-    # Use filter_complex with explicit pad names because filter chain ',' separator
-    # conflicts with commas inside crop expression (min/max/if).
-    fc = (
-        f"[0:v]crop={expr['cw']}:{expr['ch']}:{expr['x']}:{expr['y']}[cropped];"
-        f"[cropped]scale=1080:1920[out]"
-    )
-    try:
-        subprocess.run(
-            [ffmpeg_path(), "-y", "-i", input_path,
-             "-filter_complex", fc,
-             "-map", "[out]", "-map", "0:a?"]
-            + _VID_OPTS + _AUD_OPTS + [output_path],
-            check=True, capture_output=True,
-        )
-        # Validate output: must exist and be > 1KB.
-        if not Path(output_path).exists() or Path(output_path).stat().st_size < 1024:
-            print(f"[focused_crop] output too small or missing: {output_path}", flush=True)
-            return False
-        return True
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-400:]
-        print(f"[focused_crop] ffmpeg failed: {stderr}", flush=True)
-        return False
-
-
-def _apply_square_crop(input_path: str, output_path: str):
-    vf = (
-        "scale=1080:1080:force_original_aspect_ratio=increase,"
-        "crop=1080:1080"
-    )
-    subprocess.run(
-        [ffmpeg_path(), "-y", "-i", input_path, "-vf", vf]
-        + _VID_OPTS + _AUD_OPTS + [output_path],
-        check=True,
-        capture_output=True,
-    )
-
-
-_COMPLEX_SCRIPT_LANGS = {"hi", "mr", "ne", "sa", "ta", "te", "kn", "ml", "gu", "pa", "bn", "ur"}
-
-
-def burn_captions(clip: dict, transcript: dict, input_path: str, output_path: str, style: str = "word_highlight"):
-    start = clip.get("user_start_seconds") or clip["start_seconds"]
-    end = clip.get("user_end_seconds") or clip["end_seconds"]
-
-    clip_words = _extract_words_in_range(transcript.get("segments", []), start, end)
-
-    if not clip_words:
-        clip_words = _extract_sentences_in_range(transcript.get("segments", []), start, end)
-        if not clip_words:
-            shutil.copy(input_path, output_path)
-            return
-
-    language = transcript.get("language", "en")
-    font = _pick_font(language)
-    complex_script = language in _COMPLEX_SCRIPT_LANGS
-
-    ass_path = input_path.replace(".mp4", ".ass")
-    ass_content = _generate_ass(clip_words, font, complex_script=complex_script, style=style)
-    with open(ass_path, "w", encoding="utf-8") as f:
-        f.write(ass_content)
-
-    escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:")
-    subprocess.run(
-        [ffmpeg_path(require_libass=True), "-y", "-i", input_path, "-vf", f"ass={escaped}"]
-        + _VID_OPTS + _AUD_OPTS + [output_path],
-        check=True,
-        capture_output=True,
-    )
+_COMPLEX_SCRIPT_LANGS = {"hi", "mr", "ne", "sa", "ta", "te", "kn", "ml",
+                         "gu", "pa", "bn", "ur"}
 
 
 def _extract_words_in_range(segments: list, start: float, end: float) -> list:
@@ -214,14 +138,11 @@ def _extract_sentences_in_range(segments: list, start: float, end: float) -> lis
 
 
 def _pick_font(language: str) -> str:
-    devanagari_langs = {"hi", "mr", "ne", "sa"}
-    tamil_langs = {"ta"}
-    telugu_langs = {"te"}
-    if language in devanagari_langs:
+    if language in {"hi", "mr", "ne", "sa"}:
         return "Kohinoor Devanagari"
-    if language in tamil_langs:
+    if language in {"ta"}:
         return "Tamil Sangam MN"
-    if language in telugu_langs:
+    if language in {"te"}:
         return "Kohinoor Telugu"
     return "Montserrat"
 
@@ -233,13 +154,12 @@ def _format_ass_time(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:05.2f}"
 
 
-def _generate_ass(words: list, font: str, complex_script: bool = False, style: str = "word_highlight") -> str:
+def _generate_ass(words: list, font: str, complex_script: bool = False,
+                  style: str = "word_highlight") -> str:
     from services.caption_styles import get_style, COMPLEX_SAFE_ANIMATIONS
 
     cfg = get_style(style)
     animation = cfg["animation"]
-
-    # Force sentence animation for complex scripts — inline color tags break ligatures.
     if complex_script and animation not in COMPLEX_SAFE_ANIMATIONS:
         animation = "sentence"
 
@@ -258,7 +178,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     groups = _group_words(words, max_words=4)
     events = []
-
     for group in groups:
         if animation == "sentence":
             events.extend(_anim_sentence(group))
@@ -272,7 +191,6 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             events.extend(_anim_gradient_pop(group, cfg))
         else:
             events.extend(_anim_sentence(group))
-
     return header + "\n".join(events) + "\n"
 
 
@@ -285,9 +203,7 @@ def _anim_sentence(group: list) -> list:
 
 def _anim_per_word(group: list, cfg: dict) -> list:
     events = []
-    hl = cfg["highlight"]
-    dim = cfg["dim"]
-    primary = cfg["primary"]
+    hl, dim, primary = cfg["highlight"], cfg["dim"], cfg["primary"]
     for active_idx, active_word in enumerate(group):
         seg_start = _format_ass_time(active_word["start"])
         seg_end = _format_ass_time(active_word["end"])
@@ -298,18 +214,13 @@ def _anim_per_word(group: list, cfg: dict) -> list:
                 parts.append(f"{{\\1c{hl}}}{text}{{\\1c{primary}}}")
             else:
                 parts.append(f"{{\\1c{dim}}}{text}{{\\1c{primary}}}")
-        events.append(
-            f"Dialogue: 0,{seg_start},{seg_end},Default,,0,0,0,,{' '.join(parts)}"
-        )
+        events.append(f"Dialogue: 0,{seg_start},{seg_end},Default,,0,0,0,,{' '.join(parts)}")
     return events
 
 
 def _anim_karaoke_pop(group: list, cfg: dict) -> list:
-    """Each word stays visible; active word scales up + highlight color."""
     events = []
-    hl = cfg["highlight"]
-    primary = cfg["primary"]
-    dim = cfg["dim"]
+    hl, primary, dim = cfg["highlight"], cfg["primary"], cfg["dim"]
     for active_idx, active_word in enumerate(group):
         seg_start = _format_ass_time(active_word["start"])
         seg_end = _format_ass_time(active_word["end"])
@@ -326,32 +237,25 @@ def _anim_karaoke_pop(group: list, cfg: dict) -> list:
                 parts.append(f"{{\\1c{primary}}}{text}")
             else:
                 parts.append(f"{{\\1c{dim}}}{text}{{\\1c{primary}}}")
-        events.append(
-            f"Dialogue: 0,{seg_start},{seg_end},Default,,0,0,0,,{' '.join(parts)}"
-        )
+        events.append(f"Dialogue: 0,{seg_start},{seg_end},Default,,0,0,0,,{' '.join(parts)}")
     return events
 
 
 def _anim_typewriter(group: list, cfg: dict) -> list:
-    """Reveal word-by-word; each word appears at its start time, persists to group end."""
     events = []
     group_end = _format_ass_time(group[-1]["end"])
     for active_idx, active_word in enumerate(group):
         seg_start = _format_ass_time(active_word["start"])
         next_start = _format_ass_time(group[active_idx + 1]["start"]) if active_idx + 1 < len(group) else group_end
         visible_words = " ".join(w["word"].strip() for w in group[: active_idx + 1])
-        events.append(
-            f"Dialogue: 0,{seg_start},{next_start},Default,,0,0,0,,{visible_words}"
-        )
+        events.append(f"Dialogue: 0,{seg_start},{next_start},Default,,0,0,0,,{visible_words}")
     return events
 
 
 def _anim_gradient_pop(group: list, cfg: dict) -> list:
-    """Active word cycles through palette colors."""
     events = []
     palette = cfg.get("palette", [cfg["highlight"]])
-    primary = cfg["primary"]
-    dim = cfg["dim"]
+    primary, dim = cfg["primary"], cfg["dim"]
     for active_idx, active_word in enumerate(group):
         seg_start = _format_ass_time(active_word["start"])
         seg_end = _format_ass_time(active_word["end"])
@@ -363,15 +267,12 @@ def _anim_gradient_pop(group: list, cfg: dict) -> list:
                 parts.append(f"{{\\1c{color}\\t(0,200,\\fscx115\\fscy115)\\t(200,400,\\fscx100\\fscy100)}}{text}{{\\1c{primary}\\fscx100\\fscy100}}")
             else:
                 parts.append(f"{{\\1c{dim}}}{text}{{\\1c{primary}}}")
-        events.append(
-            f"Dialogue: 0,{seg_start},{seg_end},Default,,0,0,0,,{' '.join(parts)}"
-        )
+        events.append(f"Dialogue: 0,{seg_start},{seg_end},Default,,0,0,0,,{' '.join(parts)}")
     return events
 
 
 def _group_words(words: list, max_words: int = 4) -> list:
-    groups = []
-    current = []
+    groups, current = [], []
     for w in words:
         current.append(w)
         if len(current) >= max_words:
@@ -380,3 +281,184 @@ def _group_words(words: list, max_words: int = 4) -> list:
     if current:
         groups.append(current)
     return groups
+
+
+# ── Single-pass render (the heart) ──────────────────────────────────────────
+
+def render_and_caption_clip(
+    job_id: str,
+    clip: dict,
+    aspect_ratio: str = "9:16",
+    focus_mode: str = "none",
+    caption_style: str = "word_highlight",
+    include_captions: bool = True,
+    transcript: Optional[dict] = None,
+    source_dims: Optional[tuple] = None,
+    profile: str = "preview",
+) -> dict:
+    """One ffmpeg pass: cut → aspect transform → caption burn.
+
+    Returns: {final_clip_path, error}. error is None on success, str on failure.
+    Does NOT raise — caller decides how to record the failure.
+    """
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    source = str(Path(storage) / "jobs" / job_id / "original.mp4")
+    if not os.path.exists(source):
+        return {"final_clip_path": None, "error": f"source not found: {source}"}
+
+    clips_dir = get_clips_dir(job_id)
+    rank = clip.get("rank", 1)
+    final_path = str(clips_dir / f"clip_{rank:03d}_final.mp4")
+
+    start = clip.get("user_start_seconds") or clip["start_seconds"]
+    end = clip.get("user_end_seconds") or clip["end_seconds"]
+    if end <= start:
+        return {"final_clip_path": None, "error": f"invalid range: {start}-{end}"}
+
+    # Probe source dims if not supplied (Phase E2: pipeline caches and passes)
+    src_w = src_h = None
+    if source_dims:
+        src_w, src_h = source_dims
+    elif focus_mode == "speaker":
+        try:
+            src_w, src_h = probe_source_dims(source)
+        except Exception as exc:
+            return {"final_clip_path": None, "error": f"probe failed: {exc}"}
+
+    # Speaker focus: compute crop expression from focus track if available
+    focus_crop_expr = None
+    if focus_mode == "speaker" and src_w and src_h:
+        try:
+            from services.speaker_focus import (
+                load_focus_track, slice_track, build_crop_expression,
+            )
+            track = load_focus_track(job_id)
+            if track:
+                clip_track = slice_track(track, start, end)
+                if clip_track:
+                    focus_crop_expr = build_crop_expression(
+                        clip_track, src_w, src_h, 9, 16
+                    )
+        except Exception:
+            # Non-fatal: silently fall back to default 9:16 (blur+overlay)
+            focus_crop_expr = None
+        if not focus_crop_expr:
+            focus_mode = "none"
+
+    # Caption generation (writes .ass file alongside the clip)
+    captions_ass_path = None
+    if include_captions and caption_style != "none" and transcript:
+        clip_words = _extract_words_in_range(
+            transcript.get("segments", []), start, end
+        )
+        if not clip_words:
+            clip_words = _extract_sentences_in_range(
+                transcript.get("segments", []), start, end
+            )
+        if clip_words:
+            language = transcript.get("language", "en")
+            font = _pick_font(language)
+            complex_script = language in _COMPLEX_SCRIPT_LANGS
+            ass_path = str(clips_dir / f"clip_{rank:03d}.ass")
+            ass_content = _generate_ass(
+                clip_words, font, complex_script=complex_script, style=caption_style
+            )
+            with open(ass_path, "w", encoding="utf-8") as f:
+                f.write(ass_content)
+            captions_ass_path = ass_path
+
+    filter_complex = _build_video_filter(
+        aspect_ratio, focus_mode, focus_crop_expr, captions_ass_path
+    )
+
+    # Use libass-enabled ffmpeg if captions are baked in
+    ff_bin = ffmpeg_path(require_libass=bool(captions_ass_path))
+    cmd = [
+        ff_bin, "-y",
+        "-ss", str(start),
+        "-i", source,
+        "-t", str(end - start),
+        "-filter_complex", filter_complex,
+        "-map", "[out]",
+        "-map", "0:a?",
+        *encoder_video_opts(profile),
+        *encoder_audio_opts(),
+        final_path,
+    ]
+
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        return {"final_clip_path": None, "error": "render timeout (>10min)"}
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
+        return {"final_clip_path": None, "error": f"ffmpeg failed: {stderr}"}
+
+    if not Path(final_path).exists() or Path(final_path).stat().st_size < 1024:
+        return {"final_clip_path": None, "error": "output missing or empty"}
+
+    return {"final_clip_path": final_path, "error": None}
+
+
+# ── Legacy wrappers (export path still uses these) ──────────────────────────
+
+def render_clip(job_id: str, clip: dict, aspect_ratio: str = "9:16",
+                focus_mode: str = "none") -> dict:
+    """Backward-compatible wrapper. Renders without captions; returns raw+final
+    pointing at the same single-pass output file (no separate raw intermediate).
+    """
+    result = render_and_caption_clip(
+        job_id, clip,
+        aspect_ratio=aspect_ratio,
+        focus_mode=focus_mode,
+        include_captions=False,
+        profile="export",
+    )
+    if result["error"]:
+        raise RuntimeError(result["error"])
+    return {"raw_clip_path": result["final_clip_path"],
+            "final_clip_path": result["final_clip_path"]}
+
+
+def burn_captions(clip: dict, transcript: dict, input_path: str,
+                  output_path: str, style: str = "word_highlight"):
+    """Legacy export-path caption burner. Kept for services/exporter.py.
+
+    Note: the main pipeline no longer calls this — captions are baked into
+    the single-pass render. This remains for the export endpoint which
+    re-burns captions after composing the final export file.
+    """
+    start = clip.get("user_start_seconds") or clip["start_seconds"]
+    end = clip.get("user_end_seconds") or clip["end_seconds"]
+
+    clip_words = _extract_words_in_range(
+        transcript.get("segments", []), start, end
+    )
+    if not clip_words:
+        clip_words = _extract_sentences_in_range(
+            transcript.get("segments", []), start, end
+        )
+        if not clip_words:
+            shutil.copy(input_path, output_path)
+            return
+
+    language = transcript.get("language", "en")
+    font = _pick_font(language)
+    complex_script = language in _COMPLEX_SCRIPT_LANGS
+
+    ass_path = input_path.replace(".mp4", ".ass")
+    ass_content = _generate_ass(
+        clip_words, font, complex_script=complex_script, style=style
+    )
+    with open(ass_path, "w", encoding="utf-8") as f:
+        f.write(ass_content)
+
+    escaped = ass_path.replace("\\", "\\\\").replace(":", "\\:")
+    subprocess.run(
+        [ffmpeg_path(require_libass=True), "-y", "-i", input_path,
+         "-vf", f"ass={escaped}",
+         *encoder_video_opts("export"),
+         *encoder_audio_opts(),
+         output_path],
+        check=True, capture_output=True,
+    )

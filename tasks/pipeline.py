@@ -1,90 +1,224 @@
 import json
+import logging
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
+from pathlib import Path
+
 from celery_app import celery
 from database import SessionLocal
-from models import Job, Clip, User
+from models import Job, Clip, User, CreditTransaction
 from services.downloader import download_video
-from services.transcriber import transcribe
+from services.transcriber import transcribe, load_transcript
 from services.diarizer import diarize
 from services.analyzer import analyze_transcript, find_more_clips
-from services.editor import render_clip, burn_captions
-from services.transcriber import load_transcript
+from services.editor import render_and_caption_clip, probe_source_dims
 from services.credits import refund
 
 
-def _refund_failed_job(job_id: str):
-    """Refund credits to job owner when job fails."""
-    db = SessionLocal()
-    try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if not job or not job.user_id:
-            return
-        # Find original deduction (negative amount tied to this job)
-        from models import CreditTransaction
-        original = (
-            db.query(CreditTransaction)
-            .filter(
-                CreditTransaction.job_id == job_id,
-                CreditTransaction.kind == "deduct",
-            )
-            .first()
+logger = logging.getLogger(__name__)
+
+
+def _render_worker_count() -> int:
+    """Concurrency cap for parallel clip rendering within a single job.
+
+    FFmpeg itself uses multiple threads per process, so we don't want to
+    oversubscribe. Default: half of CPU count, capped at 4.
+    """
+    env = os.getenv("CLIP_RENDER_WORKERS")
+    if env and env.isdigit():
+        return max(1, int(env))
+    return max(1, min(4, (os.cpu_count() or 2) // 2))
+
+
+# ── DB helpers (single session reused per task; thread-safe writes only on main) ──
+
+def _set_job_status(db, job_id: str, status: str, progress: int = 0,
+                    error: str = None):
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job:
+        return
+    job.status = status
+    job.stage_progress = progress
+    if error:
+        job.error_message = error
+    if status == "ready":
+        job.completed_at = datetime.utcnow()
+    db.commit()
+
+
+def _refund_failed_job(db, job_id: str):
+    """Idempotent refund. Safe to call multiple times."""
+    job = db.query(Job).filter(Job.id == job_id).first()
+    if not job or not job.user_id:
+        return
+    original = (
+        db.query(CreditTransaction)
+        .filter(
+            CreditTransaction.job_id == job_id,
+            CreditTransaction.kind == "deduct",
         )
-        if not original:
-            return
-        already_refunded = (
-            db.query(CreditTransaction)
-            .filter(
-                CreditTransaction.job_id == job_id,
-                CreditTransaction.kind == "refund",
-            )
-            .first()
+        .first()
+    )
+    if not original:
+        return
+    already_refunded = (
+        db.query(CreditTransaction)
+        .filter(
+            CreditTransaction.job_id == job_id,
+            CreditTransaction.kind == "refund",
         )
-        if already_refunded:
-            return
+        .first()
+    )
+    if already_refunded:
+        return
+    user = db.query(User).filter(User.id == job.user_id).first()
+    if user:
+        refund(db, user, abs(original.amount), job_id=job_id,
+               note="Auto-refund: job failed")
+        db.commit()
 
-        user = db.query(User).filter(User.id == job.user_id).first()
-        if user:
-            refund(db, user, abs(original.amount), job_id=job_id, note="Auto-refund: job failed")
+
+# ── Clip rendering (parallel, with explicit error reporting) ────────────────
+
+def _render_one_clip(job_id: str, clip_dict: dict, aspect_ratio: str,
+                     transcript: dict, source_dims: tuple) -> dict:
+    """Pure function — runs in a thread, no DB access.
+
+    Returns: {clip_id, final_clip_path, error}
+    """
+    result = render_and_caption_clip(
+        job_id,
+        clip_dict,
+        aspect_ratio=aspect_ratio,
+        include_captions=True,
+        transcript=transcript,
+        source_dims=source_dims,
+        profile="preview",
+    )
+    return {
+        "clip_id": clip_dict["_clip_id"],
+        "final_clip_path": result["final_clip_path"],
+        "error": result["error"],
+    }
+
+
+def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
+                            transcript: dict, source_dims: tuple,
+                            progress_offset: int = 0):
+    """Render N clips concurrently. Each clip row updated as its thread finishes."""
+    if not clips:
+        return
+
+    workers = _render_worker_count()
+    total = len(clips)
+    done = 0
+
+    # Pre-flight: mark all as rendering
+    for clip_row in clips:
+        clip_row.status = "rendering"
+        clip_row.error_message = None
+    db.commit()
+
+    # Build per-clip dicts (capturing only what threads need — no ORM objects)
+    payloads = [
+        {
+            "_clip_id": c.id,
+            "rank": c.rank,
+            "start_seconds": c.start_seconds,
+            "end_seconds": c.end_seconds,
+            "user_start_seconds": c.user_start_seconds,
+            "user_end_seconds": c.user_end_seconds,
+        }
+        for c in clips
+    ]
+    by_id = {c.id: c for c in clips}
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_render_one_clip, job_id, p, aspect_ratio,
+                        transcript, source_dims)
+            for p in payloads
+        ]
+        for fut in as_completed(futures):
+            res = fut.result()
+            clip_row = by_id.get(res["clip_id"])
+            if not clip_row:
+                continue
+            if res["error"]:
+                clip_row.status = "failed"
+                clip_row.error_message = res["error"]
+                logger.warning("clip %s render failed: %s",
+                               res["clip_id"], res["error"])
+            else:
+                clip_row.final_clip_path = res["final_clip_path"]
+                clip_row.raw_clip_path = None  # No separate raw in single-pass
+                clip_row.status = "ready"
             db.commit()
-    finally:
-        db.close()
+            done += 1
+            pct = progress_offset + int(done / total * (100 - progress_offset))
+            _set_job_status(db, job_id, "clipping", pct)
 
 
-def _update_job(job_id: str, status: str, progress: int, error: str = None):
-    db = SessionLocal()
-    try:
-        job = db.query(Job).filter(Job.id == job_id).first()
-        if job:
-            job.status = status
-            job.stage_progress = progress
-            if error:
-                job.error_message = error
-            if status == "ready":
-                job.completed_at = datetime.utcnow()
-            db.commit()
-    finally:
-        db.close()
-    if status == "failed":
-        _refund_failed_job(job_id)
+def _insert_candidate_clips(db, job_id: str, candidates: list,
+                             video_duration: float, rank_offset: int = 0) -> list:
+    """Validate + insert clip candidates. Returns the new Clip rows."""
+    new_rows = []
+    for i, candidate in enumerate(candidates):
+        start = candidate.get("start_seconds")
+        end = candidate.get("end_seconds")
+        if start is None or end is None or end <= start:
+            logger.warning("dropping invalid clip candidate (start=%s end=%s)",
+                           start, end)
+            continue
+        if video_duration and (start < 0 or end > video_duration + 1):
+            logger.warning("dropping out-of-range clip (%.1f-%.1f, duration=%.1f)",
+                           start, end, video_duration)
+            continue
+        duration = end - start
+        if duration < 1:
+            continue
+        tags = json.dumps(candidate.get("tags", []))
+        clip = Clip(
+            job_id=job_id,
+            rank=rank_offset + i + 1,
+            start_seconds=start,
+            end_seconds=end,
+            duration_seconds=duration,
+            clip_type=candidate.get("clip_type", "quotable"),
+            score=candidate.get("score", 0.5),
+            reason=candidate.get("reason", ""),
+            transcript_excerpt=candidate.get("transcript_excerpt", ""),
+            hook_line=candidate.get("hook_line"),
+            tags=tags,
+            status="pending",
+        )
+        db.add(clip)
+        new_rows.append(clip)
+    db.commit()
+    return new_rows
 
+
+# ── Main pipeline task ──────────────────────────────────────────────────────
 
 @celery.task(bind=True, name="tasks.pipeline.run_full_pipeline")
 def run_full_pipeline(self, job_id: str, options: dict):
     db = SessionLocal()
     try:
-        # Stage 1: Download
-        _update_job(job_id, "downloading", 0)
+        # Stage 1: Download / accept upload
+        _set_job_status(db, job_id, "downloading", 0)
         job = db.query(Job).filter(Job.id == job_id).first()
+        if not job:
+            return
 
         def dl_progress(p):
-            _update_job(job_id, "downloading", p)
+            _set_job_status(db, job_id, "downloading", p)
 
         if job.source_type == "url":
-            meta = download_video(job.source_url, job_id, progress_callback=dl_progress)
+            meta = download_video(job.source_url, job_id,
+                                  progress_callback=dl_progress)
         else:
-            # File already saved during upload; extract audio and probe duration
             from services.downloader import _extract_audio, _get_duration, get_job_dir
-            from pathlib import Path
             job_dir = get_job_dir(job_id)
             video_path = job_dir / "original.mp4"
             audio_path = job_dir / "audio.wav"
@@ -93,115 +227,83 @@ def run_full_pipeline(self, job_id: str, options: dict):
                 duration = _get_duration(str(video_path))
             except Exception:
                 duration = None
-            meta = {
-                "title": job.source_filename,
-                "duration": duration,
-            }
+            meta = {"title": job.source_filename, "duration": duration}
+
+        # Probe source dimensions ONCE and cache on Job row (Phase E2)
+        storage = os.getenv("STORAGE_PATH", "./storage")
+        source_path = str(Path(storage) / "jobs" / job_id / "original.mp4")
+        src_w = src_h = None
+        try:
+            src_w, src_h = probe_source_dims(source_path)
+        except Exception as exc:
+            logger.warning("source dim probe failed for %s: %s", job_id, exc)
 
         job = db.query(Job).filter(Job.id == job_id).first()
         job.video_title = meta.get("title")
         if meta.get("duration"):
             job.video_duration_seconds = float(meta["duration"])
+        if src_w and src_h:
+            job.source_width = src_w
+            job.source_height = src_h
         db.commit()
 
         # Stage 2: Transcribe
-        _update_job(job_id, "transcribing", 0)
-
-        def tr_progress(p):
-            _update_job(job_id, "transcribing", p)
-
-        transcript = transcribe(job_id, progress_callback=tr_progress)
-
+        _set_job_status(db, job_id, "transcribing", 0)
+        transcript = transcribe(
+            job_id,
+            progress_callback=lambda p: _set_job_status(db, job_id, "transcribing", p),
+        )
         job = db.query(Job).filter(Job.id == job_id).first()
         job.detected_language = transcript.get("language")
         db.commit()
 
-        # Stage 3: Diarize
-        _update_job(job_id, "diarizing", 0)
-
-        def di_progress(p):
-            _update_job(job_id, "diarizing", p)
-
+        # Stage 3: Diarize (non-fatal)
+        _set_job_status(db, job_id, "diarizing", 0)
         try:
-            diarize(job_id, progress_callback=di_progress)
-        except Exception as e:
-            # Diarization is non-fatal; continue without speaker info
-            _update_job(job_id, "diarizing", 100)
+            diarize(
+                job_id,
+                progress_callback=lambda p: _set_job_status(db, job_id, "diarizing", p),
+            )
+        except Exception as exc:
+            logger.warning("diarization failed for %s (continuing): %s",
+                           job_id, exc)
+            _set_job_status(db, job_id, "diarizing", 100)
 
         # Stage 4: Analyze
-        _update_job(job_id, "analyzing", 0)
+        _set_job_status(db, job_id, "analyzing", 0)
         job = db.query(Job).filter(Job.id == job_id).first()
+        analysis_options = {**options, "video_title": job.video_title or ""}
+        clip_candidates = analyze_transcript(
+            job_id, analysis_options,
+            progress_callback=lambda p: _set_job_status(db, job_id, "analyzing", p),
+        )
 
-        analysis_options = {
-            **options,
-            "video_title": job.video_title or "",
-        }
+        clips = _insert_candidate_clips(
+            db, job_id, clip_candidates,
+            video_duration=job.video_duration_seconds or 0,
+        )
 
-        def an_progress(p):
-            _update_job(job_id, "analyzing", p)
+        if not clips:
+            _set_job_status(db, job_id, "ready", 100)
+            return
 
-        clip_candidates = analyze_transcript(job_id, analysis_options, progress_callback=an_progress)
-
-        # Save clip candidates to DB
-        for candidate in clip_candidates:
-            duration = candidate["end_seconds"] - candidate["start_seconds"]
-            tags = json.dumps(candidate.get("tags", []))
-            clip = Clip(
-                job_id=job_id,
-                rank=candidate["rank"],
-                start_seconds=candidate["start_seconds"],
-                end_seconds=candidate["end_seconds"],
-                duration_seconds=duration,
-                clip_type=candidate["clip_type"],
-                score=candidate["score"],
-                reason=candidate["reason"],
-                transcript_excerpt=candidate.get("transcript_excerpt", ""),
-                hook_line=candidate.get("hook_line"),
-                tags=tags,
-                status="pending",
-            )
-            db.add(clip)
-        db.commit()
-
-        # Stage 5: Render clips
-        _update_job(job_id, "clipping", 0)
-        transcript_data = load_transcript(job_id)
+        # Stage 5: Render clips in parallel
+        _set_job_status(db, job_id, "clipping", 0)
         aspect_ratio = options.get("target_aspect_ratio", "9:16")
+        source_dims = (src_w, src_h) if (src_w and src_h) else None
 
-        db.expire_all()
-        clips = db.query(Clip).filter(Clip.job_id == job_id).all()
+        _render_clips_parallel(
+            db, job_id, clips, aspect_ratio,
+            transcript=transcript,  # passed through, no re-load per clip
+            source_dims=source_dims,
+        )
 
-        for i, clip_row in enumerate(clips):
-            clip_dict = {
-                "rank": clip_row.rank,
-                "start_seconds": clip_row.start_seconds,
-                "end_seconds": clip_row.end_seconds,
-            }
+        _set_job_status(db, job_id, "ready", 100)
 
-            clip_row.status = "rendering"
-            db.commit()
-
-            result = None
-            try:
-                result = render_clip(job_id, clip_dict, aspect_ratio)
-                captioned_path = result["final_clip_path"].replace("_final.mp4", "_captioned.mp4")
-                burn_captions(clip_dict, transcript_data, result["final_clip_path"], captioned_path)
-                clip_row.raw_clip_path = result["raw_clip_path"]
-                clip_row.final_clip_path = captioned_path
-                clip_row.status = "ready"
-            except Exception:
-                clip_row.status = "ready"
-                clip_row.raw_clip_path = result["raw_clip_path"] if result else None
-                clip_row.final_clip_path = result["final_clip_path"] if result else None
-
-            db.commit()
-            progress = int((i + 1) / len(clips) * 100)
-            _update_job(job_id, "clipping", progress)
-
-        _update_job(job_id, "ready", 100)
-
-    except Exception as e:
-        _update_job(job_id, "failed", 0, error=str(e))
+    except Exception as exc:
+        logger.exception("pipeline failed for job %s", job_id)
+        _set_job_status(db, job_id, "failed", 0, error=str(exc))
+        _refund_failed_job(db, job_id)
         raise
     finally:
         db.close()
@@ -211,75 +313,46 @@ def run_full_pipeline(self, job_id: str, options: dict):
 def run_more_clips(self, job_id: str, options: dict, excluded_clips: list):
     db = SessionLocal()
     try:
-        _update_job(job_id, "analyzing", 0)
+        _set_job_status(db, job_id, "analyzing", 0)
         job = db.query(Job).filter(Job.id == job_id).first()
-
-        analysis_options = {**options, "video_title": job.video_title or ""}
-
-        def an_progress(p):
-            _update_job(job_id, "analyzing", p)
-
-        new_candidates = find_more_clips(
-            job_id, excluded_clips, analysis_options, progress_callback=an_progress
-        )
-
-        if not new_candidates:
-            _update_job(job_id, "ready", 100)
+        if not job:
             return
 
-        # Determine next rank offset from existing clips
-        existing_max_rank = db.query(Clip).filter(Clip.job_id == job_id).count()
+        analysis_options = {**options, "video_title": job.video_title or ""}
+        new_candidates = find_more_clips(
+            job_id, excluded_clips, analysis_options,
+            progress_callback=lambda p: _set_job_status(db, job_id, "analyzing", p),
+        )
+        if not new_candidates:
+            _set_job_status(db, job_id, "ready", 100)
+            return
 
-        _update_job(job_id, "clipping", 0)
-        transcript_data = load_transcript(job_id)
+        existing_count = db.query(Clip).filter(Clip.job_id == job_id).count()
+        clips = _insert_candidate_clips(
+            db, job_id, new_candidates,
+            video_duration=job.video_duration_seconds or 0,
+            rank_offset=existing_count,
+        )
+        if not clips:
+            _set_job_status(db, job_id, "ready", 100)
+            return
+
+        _set_job_status(db, job_id, "clipping", 0)
         aspect_ratio = options.get("target_aspect_ratio", "9:16")
+        transcript = load_transcript(job_id)
+        source_dims = (job.source_width, job.source_height) \
+            if (job.source_width and job.source_height) else None
 
-        for i, candidate in enumerate(new_candidates):
-            rank = existing_max_rank + i + 1
-            duration = candidate["end_seconds"] - candidate["start_seconds"]
-            clip_row = Clip(
-                job_id=job_id,
-                rank=rank,
-                start_seconds=candidate["start_seconds"],
-                end_seconds=candidate["end_seconds"],
-                duration_seconds=duration,
-                clip_type=candidate["clip_type"],
-                score=candidate["score"],
-                reason=candidate["reason"],
-                transcript_excerpt=candidate.get("transcript_excerpt", ""),
-                hook_line=candidate.get("hook_line"),
-                tags=json.dumps(candidate.get("tags", [])),
-                status="rendering",
-            )
-            db.add(clip_row)
-            db.commit()
+        _render_clips_parallel(
+            db, job_id, clips, aspect_ratio,
+            transcript=transcript, source_dims=source_dims,
+        )
 
-            clip_dict = {
-                "rank": rank,
-                "start_seconds": candidate["start_seconds"],
-                "end_seconds": candidate["end_seconds"],
-            }
+        _set_job_status(db, job_id, "ready", 100)
 
-            result = None
-            try:
-                result = render_clip(job_id, clip_dict, aspect_ratio)
-                captioned_path = result["final_clip_path"].replace("_final.mp4", "_captioned.mp4")
-                burn_captions(clip_dict, transcript_data, result["final_clip_path"], captioned_path)
-                clip_row.raw_clip_path = result["raw_clip_path"]
-                clip_row.final_clip_path = captioned_path
-                clip_row.status = "ready"
-            except Exception:
-                clip_row.status = "ready"
-                clip_row.raw_clip_path = result["raw_clip_path"] if result else None
-                clip_row.final_clip_path = result["final_clip_path"] if result else None
-
-            db.commit()
-            _update_job(job_id, "clipping", int((i + 1) / len(new_candidates) * 100))
-
-        _update_job(job_id, "ready", 100)
-
-    except Exception as e:
-        _update_job(job_id, "failed", 0, error=str(e))
+    except Exception as exc:
+        logger.exception("more-clips failed for job %s", job_id)
+        _set_job_status(db, job_id, "failed", 0, error=str(exc))
         raise
     finally:
         db.close()

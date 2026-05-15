@@ -73,13 +73,23 @@ def _diarize_local(job_id: str, progress_callback=None) -> list:
     return segments
 
 
+_diarization_cache: dict = {}
+
+
 def load_diarization(job_id: str) -> list:
+    cached = _diarization_cache.get(job_id)
+    if cached is not None:
+        return cached
     storage = os.getenv("STORAGE_PATH", "./storage")
     path = Path(storage) / "jobs" / job_id / "diarization.json"
     if not path.exists():
         return []
     with open(path, "r") as f:
-        return json.load(f)
+        data = json.load(f)
+    if len(_diarization_cache) >= 4:
+        _diarization_cache.pop(next(iter(_diarization_cache)))
+    _diarization_cache[job_id] = data
+    return data
 
 
 def get_speaker_at(segments: list, time_seconds: float) -> str:

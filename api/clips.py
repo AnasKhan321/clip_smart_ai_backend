@@ -7,7 +7,7 @@ from models import Clip, Job, User
 from schemas import ClipOut, ClipUpdate, ExportRequest
 from services.exporter import export_clip
 from services.transcriber import load_transcript
-from services.editor import render_clip, burn_captions
+from services.editor import render_and_caption_clip
 from auth import get_current_user
 
 router = APIRouter()
@@ -37,6 +37,15 @@ def update_clip(
 ):
     clip = _owned_clip(clip_id, db, user)
 
+    # Validate trim bounds
+    new_start = body.user_start_seconds if body.user_start_seconds is not None \
+        else clip.user_start_seconds
+    new_end = body.user_end_seconds if body.user_end_seconds is not None \
+        else clip.user_end_seconds
+    if new_start is not None and new_end is not None and new_end <= new_start:
+        raise HTTPException(status_code=400,
+                            detail="user_end_seconds must exceed user_start_seconds")
+
     trim_changed = False
     if body.user_start_seconds is not None:
         clip.user_start_seconds = body.user_start_seconds
@@ -52,7 +61,6 @@ def update_clip(
 
     db.commit()
 
-    # Re-render if trim changed
     if trim_changed:
         _rerender_clip(clip, db)
 
@@ -62,6 +70,7 @@ def update_clip(
 
 def _rerender_clip(clip: Clip, db: Session):
     clip.status = "rendering"
+    clip.error_message = None
     db.commit()
 
     clip_dict = {
@@ -72,15 +81,29 @@ def _rerender_clip(clip: Clip, db: Session):
         "user_end_seconds": clip.user_end_seconds,
     }
 
+    job = db.query(Job).filter(Job.id == clip.job_id).first()
+    source_dims = (job.source_width, job.source_height) \
+        if (job and job.source_width and job.source_height) else None
+
     try:
-        result = render_clip(clip.job_id, clip_dict)
         transcript = load_transcript(clip.job_id)
-        captioned = result["final_clip_path"].replace("_final.mp4", "_captioned.mp4")
-        burn_captions(clip_dict, transcript, result["final_clip_path"], captioned)
-        clip.raw_clip_path = result["raw_clip_path"]
-        clip.final_clip_path = captioned
-        clip.status = "ready"
-    except Exception as e:
+    except FileNotFoundError:
+        transcript = None
+
+    result = render_and_caption_clip(
+        clip.job_id, clip_dict,
+        aspect_ratio="9:16",
+        include_captions=True,
+        transcript=transcript,
+        source_dims=source_dims,
+        profile="preview",
+    )
+    if result["error"]:
+        clip.status = "failed"
+        clip.error_message = result["error"]
+    else:
+        clip.final_clip_path = result["final_clip_path"]
+        clip.raw_clip_path = None
         clip.status = "ready"
 
     db.commit()

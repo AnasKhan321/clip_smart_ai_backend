@@ -218,8 +218,9 @@ def _render_manual_clip_bg(clip_id: str):
         clip = db.query(Clip).filter(Clip.id == clip_id).first()
         if not clip:
             return
-        from services.editor import render_clip, burn_captions
+        from services.editor import render_and_caption_clip
         from services.transcriber import load_transcript
+
         clip_dict = {
             "rank": clip.rank,
             "start_seconds": clip.start_seconds,
@@ -227,16 +228,32 @@ def _render_manual_clip_bg(clip_id: str):
             "user_start_seconds": None,
             "user_end_seconds": None,
         }
+
+        job = db.query(Job).filter(Job.id == clip.job_id).first()
+        source_dims = (job.source_width, job.source_height) \
+            if (job and job.source_width and job.source_height) else None
         try:
-            result = render_clip(clip.job_id, clip_dict)
             transcript = load_transcript(clip.job_id)
-            captioned = result["final_clip_path"].replace("_final.mp4", "_captioned.mp4")
-            burn_captions(clip_dict, transcript, result["final_clip_path"], captioned)
-            clip.raw_clip_path = result["raw_clip_path"]
-            clip.final_clip_path = captioned
-        except Exception:
-            pass
-        clip.status = "ready"
+        except FileNotFoundError:
+            transcript = None
+
+        result = render_and_caption_clip(
+            clip.job_id, clip_dict,
+            aspect_ratio="9:16",
+            include_captions=True,
+            transcript=transcript,
+            source_dims=source_dims,
+            profile="preview",
+        )
+        if result["error"]:
+            clip.status = "failed"
+            clip.error_message = result["error"]
+            logger.warning("manual clip %s render failed: %s",
+                           clip_id, result["error"])
+        else:
+            clip.final_clip_path = result["final_clip_path"]
+            clip.raw_clip_path = None
+            clip.status = "ready"
         db.commit()
     finally:
         db.close()

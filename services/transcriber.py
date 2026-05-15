@@ -296,8 +296,27 @@ def _check_transcript_quality(result: dict):
         )
 
 
+_transcript_cache: dict = {}
+_TRANSCRIPT_CACHE_MAX = 4
+
+
 def load_transcript(job_id: str) -> dict:
+    cached = _transcript_cache.get(job_id)
+    if cached is not None:
+        return cached
     storage = os.getenv("STORAGE_PATH", "./storage")
     path = Path(storage) / "jobs" / job_id / "transcript.json"
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if len(_transcript_cache) >= _TRANSCRIPT_CACHE_MAX:
+        # Drop oldest insertion (CPython dicts preserve order)
+        _transcript_cache.pop(next(iter(_transcript_cache)))
+    _transcript_cache[job_id] = data
+    return data
+
+
+def invalidate_transcript_cache(job_id: str = None):
+    if job_id is None:
+        _transcript_cache.clear()
+    else:
+        _transcript_cache.pop(job_id, None)

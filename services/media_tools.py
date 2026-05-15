@@ -1,13 +1,14 @@
+import functools
 import os
 import shutil
+import subprocess
 from pathlib import Path
+from typing import Optional
 
 
 class MediaToolMissingError(RuntimeError):
     pass
 
-
-from typing import Optional
 
 def _first_existing(candidates: list[str]) -> Optional[str]:
     for candidate in candidates:
@@ -66,6 +67,57 @@ def ffprobe_path() -> str:
         "FFprobe is not installed or not on PATH. It is included with FFmpeg: sudo apt update && sudo apt install -y ffmpeg. "
         "If you installed it somewhere custom, set FFPROBE_BIN=/full/path/to/ffprobe in backend/.env."
     )
+
+
+@functools.lru_cache(maxsize=1)
+def detect_hwaccel() -> Optional[str]:
+    """Detect available H.264 hardware encoder. Cached for process lifetime.
+
+    Preference order: videotoolbox (macOS) > nvenc (NVIDIA) > qsv (Intel) > amf (AMD).
+    Override with ENCODER=software in env to force libx264.
+    """
+    if os.getenv("ENCODER", "auto").lower() == "software":
+        return None
+    try:
+        result = subprocess.run(
+            [ffmpeg_path(), "-hide_banner", "-encoders"],
+            capture_output=True, text=True, check=True, timeout=10,
+        )
+        out = result.stdout
+    except Exception:
+        return None
+    for enc in ("h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"):
+        if enc in out:
+            return enc
+    return None
+
+
+def encoder_video_opts(profile: str = "preview") -> list[str]:
+    """FFmpeg -c:v + tuning args. profile: 'preview' (fast) or 'export' (quality)."""
+    hw = detect_hwaccel()
+    if hw == "h264_videotoolbox":
+        bitrate = "8M" if profile == "export" else "4M"
+        return ["-c:v", "h264_videotoolbox", "-b:v", bitrate, "-allow_sw", "1",
+                "-pix_fmt", "yuv420p"]
+    if hw == "h264_nvenc":
+        cq = "20" if profile == "export" else "26"
+        return ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+                "-cq", cq, "-pix_fmt", "yuv420p"]
+    if hw == "h264_qsv":
+        q = "20" if profile == "export" else "26"
+        return ["-c:v", "h264_qsv", "-global_quality", q, "-pix_fmt", "yuv420p"]
+    if hw == "h264_amf":
+        q = "20" if profile == "export" else "26"
+        return ["-c:v", "h264_amf", "-quality", "balanced", "-qp_i", q,
+                "-pix_fmt", "yuv420p"]
+    # libx264 fallback
+    crf = "20" if profile == "export" else "26"
+    preset = "medium" if profile == "export" else "ultrafast"
+    return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-pix_fmt", "yuv420p"]
+
+
+def encoder_audio_opts() -> list[str]:
+    return ["-c:a", "aac", "-b:a", "192k"]
 
 
 def media_tools_status() -> dict:

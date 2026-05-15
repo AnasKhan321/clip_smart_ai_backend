@@ -25,6 +25,7 @@ class ClipOut(BaseModel):
     user_end_seconds: Optional[float] = None
     user_approved: bool
     user_notes: Optional[str] = None
+    error_message: Optional[str] = None
     created_at: datetime
 
 
