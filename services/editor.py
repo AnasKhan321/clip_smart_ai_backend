@@ -138,25 +138,27 @@ def _extract_sentences_in_range(segments: list, start: float, end: float) -> lis
 
 
 def _pick_font(language: str) -> str:
-    # System-font names. libass picks the first installed match; the Mac
-    # names work on dev laptops, the Noto names work in the Linux container.
+    # ASS Fontname is a single font name, not a fallback list — libass treats
+    # commas literally. Pick one name that is actually installed in the
+    # container (fonts-noto*, fonts-indic via Dockerfile). Fontconfig in libass
+    # will still substitute close matches if exact name missing.
     if language in {"hi", "mr", "ne", "sa"}:
-        return "Kohinoor Devanagari,Noto Sans Devanagari,Noto Sans"
-    if language in {"ta"}:
-        return "Tamil Sangam MN,Noto Sans Tamil,Noto Sans"
-    if language in {"te"}:
-        return "Kohinoor Telugu,Noto Sans Telugu,Noto Sans"
-    if language in {"bn"}:
-        return "Noto Sans Bengali,Noto Sans"
-    if language in {"gu"}:
-        return "Noto Sans Gujarati,Noto Sans"
-    if language in {"pa"}:
-        return "Noto Sans Gurmukhi,Noto Sans"
-    if language in {"kn"}:
-        return "Noto Sans Kannada,Noto Sans"
-    if language in {"ml"}:
-        return "Noto Sans Malayalam,Noto Sans"
-    return "Montserrat,Noto Sans,DejaVu Sans"
+        return "Noto Sans Devanagari"
+    if language == "ta":
+        return "Noto Sans Tamil"
+    if language == "te":
+        return "Noto Sans Telugu"
+    if language == "bn":
+        return "Noto Sans Bengali"
+    if language == "gu":
+        return "Noto Sans Gujarati"
+    if language == "pa":
+        return "Noto Sans Gurmukhi"
+    if language == "kn":
+        return "Noto Sans Kannada"
+    if language == "ml":
+        return "Noto Sans Malayalam"
+    return "Noto Sans"
 
 
 def _format_ass_time(seconds: float) -> str:
