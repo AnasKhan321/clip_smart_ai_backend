@@ -13,11 +13,13 @@ from api.debug import router as debug_router
 
 load_dotenv()
 
-CORS_ORIGINS = [
-"http://localhost:5173",
-"http://127.0.0.1:5173",
-"https://clip-smart-ai-frontend-kappa.vercel.app"
+_DEFAULT_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://clip-smart-ai-frontend-kappa.vercel.app",
 ]
+_env_origins = os.getenv("CORS_ORIGINS", "")
+CORS_ORIGINS = [o.strip() for o in _env_origins.split(",") if o.strip()] or _DEFAULT_ORIGINS
 
 print(f"CORS_ORIGINS: {CORS_ORIGINS}")
 
