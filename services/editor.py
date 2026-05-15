@@ -5,7 +5,7 @@ from pathlib import Path
 from services.media_tools import ffmpeg_path, ffprobe_path
 
 # Production encode settings: CRF 18, yuv420p for broad compatibility
-_VID_OPTS = ["-c:v", "libx264", "-crf", "18", "-preset", "medium", "-pix_fmt", "yuv420p"]
+_VID_OPTS = ["-c:v", "libx264", "-crf", "18", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-threads", "1"]
 _AUD_OPTS = ["-c:a", "aac", "-b:a", "192k"]
 
 
@@ -57,7 +57,7 @@ def _apply_vertical_crop(input_path: str, output_path: str):
     filter_complex = (
         "[0:v]split=2[bg][fg];"
         "[bg]scale=1080:1920:force_original_aspect_ratio=increase,"
-        "crop=1080:1920,boxblur=25:5[blurred];"
+        "crop=1080:1920,boxblur=10:2[blurred];"
         "[fg]scale=1080:-2[scaled];"
         "[blurred][scaled]overlay=(W-w)/2:(H-h)/2[out]"
     )
