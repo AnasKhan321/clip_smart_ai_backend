@@ -15,7 +15,7 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-if [ "${DISABLE_WORKER:-1}" != "1" ]; then
+if [ "${DISABLE_WORKER:-0}" != "1" ]; then
     echo "[start.sh] launching celery worker (pool=${CELERY_POOL:-solo}, concurrency=${CELERY_CONCURRENCY})"
     celery -A celery_app worker \
         --loglevel=INFO \
