@@ -57,8 +57,3 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(clips_router, prefix="/api")
 app.include_router(debug_router, prefix="/api")
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}

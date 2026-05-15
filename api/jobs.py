@@ -346,5 +346,5 @@ def regenerate_job(
         "_skip_to_analyze": True,
     }
 
-    run_full_pipeline.delay(job_id, options)
+    run_task_in_background(run_full_pipeline, job_id, options)
     return {"job_id": job_id, "status": "analyzing"}
