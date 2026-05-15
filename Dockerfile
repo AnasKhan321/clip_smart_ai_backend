@@ -2,15 +2,16 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     NODE_BIN=/usr/bin/node \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    CELERY_CONCURRENCY=2
 
 # System deps
 #  ffmpeg          → audio/video work (includes libass for caption burn)
 #  nodejs          → yt-dlp-ejs n-challenge solver for YouTube
 #  fonts-*         → caption rendering for Latin + Indic scripts + Montserrat
-#  libsm6/libxext6 → OpenCV runtime (used by speaker_focus)
+#  libsm6/libxext6/libgl1 → OpenCV runtime (speaker_focus)
+#  supervisor      → runs uvicorn + celery worker in the same container
 #  ca-certificates → HTTPS for yt-dlp / Supabase / OpenRouter
-#  curl            → healthcheck convenience
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
@@ -23,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libgl1 \
+    supervisor \
     ca-certificates \
     curl \
     git \
@@ -42,6 +44,7 @@ RUN mkdir -p /app/storage/jobs
 ENV PORT=8000
 EXPOSE 8000
 
-# Default CMD runs the web. The worker service should override with:
-#   CMD ["celery", "-A", "celery_app", "worker", "--loglevel=INFO", "--concurrency=2"]
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Single-container deploy: supervisord runs the API and the Celery worker
+# together. Both processes share the container's RAM/CPU — if you hit OOMs
+# either lower CELERY_CONCURRENCY or split into two services.
+CMD ["supervisord", "-c", "/app/supervisord.conf"]
