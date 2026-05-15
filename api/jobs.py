@@ -182,6 +182,14 @@ def more_clips(
     if job.status not in ("ready", "failed"):
         raise HTTPException(status_code=400, detail="Job must be complete before requesting more clips")
 
+    max_clips = int(body.get("max_clips", 5))
+
+    # Charge credits for the additional clips before dispatching.
+    # Raises 402 in prod if balance is short; no-op in dev (logged as bypass).
+    cost = cost_for_job(max_clips)
+    deduct(db, user, cost, job_id=job_id,
+           note=f"More clips: {max_clips} additional")
+
     existing_clips = db.query(Clip).filter(Clip.job_id == job_id).all()
     excluded = [
         {"start_seconds": c.start_seconds, "end_seconds": c.end_seconds}
@@ -190,7 +198,7 @@ def more_clips(
 
     options = {
         "source_url": job.source_url,
-        "max_clips": body.get("max_clips", 5),
+        "max_clips": max_clips,
         "clip_types": body.get("clip_types", ["controversy", "hook_intro", "quotable", "shocking_stat", "myth_bust"]),
         "min_clip_duration": body.get("min_clip_duration", 20),
         "max_clip_duration": body.get("max_clip_duration", 90),
@@ -203,7 +211,9 @@ def more_clips(
     db.commit()
 
     dispatch = run_task_in_background(run_more_clips, job_id, options, excluded)
-    return {"job_id": job_id, "status": "analyzing", "excluded_clips": len(excluded), "dispatch": dispatch}
+    return {"job_id": job_id, "status": "analyzing",
+            "excluded_clips": len(excluded), "credits_charged": cost,
+            "dispatch": dispatch}
 
 
 class ManualClipIn(BaseModel):

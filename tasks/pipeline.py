@@ -48,33 +48,37 @@ def _set_job_status(db, job_id: str, status: str, progress: int = 0,
 
 
 def _refund_failed_job(db, job_id: str):
-    """Idempotent refund. Safe to call multiple times."""
+    """Refund any net-outstanding deduct on this job.
+
+    Computes (sum of deduct amounts) - (sum of refund amounts). If positive,
+    refunds the difference in a single transaction. Idempotent: re-running is
+    a no-op once everything is balanced.
+    """
     job = db.query(Job).filter(Job.id == job_id).first()
     if not job or not job.user_id:
         return
-    original = (
-        db.query(CreditTransaction)
-        .filter(
-            CreditTransaction.job_id == job_id,
-            CreditTransaction.kind == "deduct",
-        )
-        .first()
-    )
-    if not original:
+
+    deducts = db.query(CreditTransaction).filter(
+        CreditTransaction.job_id == job_id,
+        CreditTransaction.kind == "deduct",
+    ).all()
+    if not deducts:
         return
-    already_refunded = (
-        db.query(CreditTransaction)
-        .filter(
-            CreditTransaction.job_id == job_id,
-            CreditTransaction.kind == "refund",
-        )
-        .first()
-    )
-    if already_refunded:
+
+    refunds = db.query(CreditTransaction).filter(
+        CreditTransaction.job_id == job_id,
+        CreditTransaction.kind == "refund",
+    ).all()
+
+    deducted_total = sum(abs(d.amount) for d in deducts)
+    refunded_total = sum(r.amount for r in refunds)
+    outstanding = deducted_total - refunded_total
+    if outstanding <= 0:
         return
+
     user = db.query(User).filter(User.id == job.user_id).first()
     if user:
-        refund(db, user, abs(original.amount), job_id=job_id,
+        refund(db, user, outstanding, job_id=job_id,
                note="Auto-refund: job failed")
         db.commit()
 
@@ -353,6 +357,7 @@ def run_more_clips(self, job_id: str, options: dict, excluded_clips: list):
     except Exception as exc:
         logger.exception("more-clips failed for job %s", job_id)
         _set_job_status(db, job_id, "failed", 0, error=str(exc))
+        _refund_failed_job(db, job_id)
         raise
     finally:
         db.close()
