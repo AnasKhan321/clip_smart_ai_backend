@@ -9,9 +9,13 @@ set -e
 : "${PORT:=8000}"
 : "${CELERY_CONCURRENCY:=2}"
 
-echo "[start.sh] launching celery worker (concurrency=${CELERY_CONCURRENCY})"
+echo "[start.sh] launching celery worker (pool=${CELERY_POOL:-solo}, concurrency=${CELERY_CONCURRENCY})"
+# Default pool=solo on small containers: one process, one task at a time.
+# Prefork forks 1 + N children which inherit task imports — multiplies memory
+# (3 processes * ~200MB = OOM on 512MB tier). Solo is single-process, no fork.
 celery -A celery_app worker \
     --loglevel=INFO \
+    --pool="${CELERY_POOL:-solo}" \
     --concurrency="${CELERY_CONCURRENCY}" \
     --without-mingle \
     --without-gossip \

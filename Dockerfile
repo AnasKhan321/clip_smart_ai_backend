@@ -3,7 +3,10 @@ FROM python:3.11-slim
 ENV PYTHONUNBUFFERED=1 \
     NODE_BIN=/usr/bin/node \
     PIP_NO_CACHE_DIR=1 \
-    CELERY_CONCURRENCY=2
+    CELERY_CONCURRENCY=1 \
+    CELERY_POOL=solo \
+    CLIP_RENDER_WORKERS=1 \
+    ANALYZER_CHUNK_WORKERS=2
 
 # System deps
 #  ffmpeg          → audio/video work (includes libass for caption burn)
