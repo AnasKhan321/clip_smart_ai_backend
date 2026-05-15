@@ -373,31 +373,69 @@ def render_and_caption_clip(
 
     # Use libass-enabled ffmpeg if captions are baked in
     ff_bin = ffmpeg_path(require_libass=bool(captions_ass_path))
-    cmd = [
-        ff_bin, "-y",
-        "-ss", str(start),
-        "-i", source,
-        "-t", str(end - start),
-        "-filter_complex", filter_complex,
-        "-map", "[out]",
-        "-map", "0:a?",
-        *encoder_video_opts(profile),
-        *encoder_audio_opts(),
-        final_path,
-    ]
 
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
-    except subprocess.TimeoutExpired:
-        return {"final_clip_path": None, "error": "render timeout (>10min)"}
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
-        return {"final_clip_path": None, "error": f"ffmpeg failed: {stderr}"}
+    def _run(video_opts: list[str]) -> tuple[int, str]:
+        cmd = [
+            ff_bin, "-y",
+            "-ss", str(start),
+            "-i", source,
+            "-t", str(end - start),
+            "-filter_complex", filter_complex,
+            "-map", "[out]",
+            "-map", "0:a?",
+            *video_opts,
+            *encoder_audio_opts(),
+            final_path,
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+            return 0, ""
+        except subprocess.TimeoutExpired:
+            return -1, "render timeout (>10min)"
+        except subprocess.CalledProcessError as e:
+            stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
+            return e.returncode, stderr
+
+    rc, err = _run(encoder_video_opts(profile))
+
+    # Hardware encoder can list as available but fail at encode time
+    # (NVENC on a CPU-only host, VideoToolbox under a sandboxed container, etc).
+    # Fall back to libx264 once and remember the decision for this process.
+    if rc != 0 and _is_hwaccel_failure(err):
+        _disable_hwaccel_for_process()
+        rc, err = _run(encoder_video_opts(profile))
+
+    if rc != 0:
+        return {"final_clip_path": None, "error": f"ffmpeg failed: {err}"}
 
     if not Path(final_path).exists() or Path(final_path).stat().st_size < 1024:
         return {"final_clip_path": None, "error": "output missing or empty"}
 
     return {"final_clip_path": final_path, "error": None}
+
+
+def _is_hwaccel_failure(stderr: str) -> bool:
+    """Heuristic: did the failure come from a hardware encoder?
+
+    Compile-time detection (ffmpeg -encoders) can list encoders that fail at
+    runtime (NVENC on CPU-only host, etc). We match hw-specific tokens, not
+    generic "invalid argument", to avoid falsely retrying real bugs.
+    """
+    s = (stderr or "").lower()
+    return any(k in s for k in (
+        "nvenc", "videotoolbox", "qsv", "h264_amf",
+        "no nvidia", "cannot load nvcuda",
+    ))
+
+
+def _disable_hwaccel_for_process():
+    """Force libx264 for remainder of process. Clears the lru_cache and pins ENCODER."""
+    from services.media_tools import detect_hwaccel
+    os.environ["ENCODER"] = "software"
+    try:
+        detect_hwaccel.cache_clear()
+    except AttributeError:
+        pass
 
 
 # ── Legacy wrappers (export path still uses these) ──────────────────────────

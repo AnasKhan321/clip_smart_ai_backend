@@ -69,25 +69,55 @@ def ffprobe_path() -> str:
     )
 
 
+def _encoder_actually_works(encoder: str) -> bool:
+    """Run a tiny dummy encode to verify the encoder works at runtime.
+
+    Compile-time presence (ffmpeg -encoders) does not imply GPU/hardware
+    availability. NVENC and friends list in -encoders even on machines
+    without the actual hardware, and only fail at encode time. We catch
+    that here once, cached for process lifetime.
+    """
+    try:
+        result = subprocess.run(
+            [ffmpeg_path(), "-hide_banner", "-loglevel", "error",
+             "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.1:r=1",
+             "-c:v", encoder, "-frames:v", "1", "-f", "null", "-"],
+            capture_output=True, timeout=15,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 @functools.lru_cache(maxsize=1)
 def detect_hwaccel() -> Optional[str]:
-    """Detect available H.264 hardware encoder. Cached for process lifetime.
+    """Detect a working H.264 hardware encoder. Cached for process lifetime.
 
     Preference order: videotoolbox (macOS) > nvenc (NVIDIA) > qsv (Intel) > amf (AMD).
-    Override with ENCODER=software in env to force libx264.
+    Each candidate is BOTH compile-checked and run-tested before being chosen,
+    so a binary that advertises nvenc on a non-GPU host falls back cleanly.
+    Override with ENCODER=software to force libx264, or ENCODER=<name> to pin.
     """
-    if os.getenv("ENCODER", "auto").lower() == "software":
+    forced = os.getenv("ENCODER", "auto").lower()
+    if forced == "software":
         return None
     try:
         result = subprocess.run(
             [ffmpeg_path(), "-hide_banner", "-encoders"],
             capture_output=True, text=True, check=True, timeout=10,
         )
-        out = result.stdout
+        compiled = result.stdout
     except Exception:
         return None
+
+    if forced not in ("auto", ""):
+        # Caller pinned a specific encoder — trust them, just verify it runs.
+        if forced in compiled and _encoder_actually_works(forced):
+            return forced
+        return None
+
     for enc in ("h264_videotoolbox", "h264_nvenc", "h264_qsv", "h264_amf"):
-        if enc in out:
+        if enc in compiled and _encoder_actually_works(enc):
             return enc
     return None
 
