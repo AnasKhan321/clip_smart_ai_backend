@@ -42,6 +42,16 @@ os.makedirs(storage_path, exist_ok=True)
 
 app.mount("/storage", StaticFiles(directory=storage_path), name="storage")
 
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "clipforge-api"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
 app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
