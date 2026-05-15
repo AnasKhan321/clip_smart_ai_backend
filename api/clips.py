@@ -1,6 +1,6 @@
 import os
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from database import get_db
 from models import Clip, Job, User
@@ -119,6 +119,66 @@ def export_clip_endpoint(
         return {"export_path": export_path, "download_url": f"/api/clips/{clip_id}/download"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/clips/{clip_id}/stream")
+def stream_clip(clip_id: str, request: Request, db: Session = Depends(get_db)):
+    clip = db.query(Clip).filter(Clip.id == clip_id).first()
+    if not clip:
+        raise HTTPException(status_code=404, detail="Clip not found")
+
+    path = clip.final_clip_path
+    if not path or not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Clip file not found")
+
+    file_size = os.path.getsize(path)
+    range_header = request.headers.get("range")
+
+    if range_header:
+        start, end = 0, file_size - 1
+        try:
+            parts = range_header.replace("bytes=", "").split("-")
+            start = int(parts[0])
+            end = int(parts[1]) if parts[1] else file_size - 1
+        except Exception:
+            pass
+        chunk_size = end - start + 1
+
+        def iter_file():
+            with open(path, "rb") as f:
+                f.seek(start)
+                remaining = chunk_size
+                while remaining > 0:
+                    data = f.read(min(65536, remaining))
+                    if not data:
+                        break
+                    remaining -= len(data)
+                    yield data
+
+        return StreamingResponse(
+            iter_file(),
+            status_code=206,
+            media_type="video/mp4",
+            headers={
+                "Content-Range": f"bytes {start}-{end}/{file_size}",
+                "Accept-Ranges": "bytes",
+                "Content-Length": str(chunk_size),
+            },
+        )
+
+    def iter_full():
+        with open(path, "rb") as f:
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        iter_full(),
+        media_type="video/mp4",
+        headers={
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(file_size),
+        },
+    )
 
 
 @router.get("/clips/{clip_id}/download")
