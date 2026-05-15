@@ -16,11 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     nodejs \
     fonts-noto \
-    fonts-noto-core \
     fonts-noto-cjk \
     fonts-indic \
     fonts-noto-color-emoji \
-    fonts-montserrat \
     libsm6 \
     libxext6 \
     libgl1 \

@@ -138,13 +138,25 @@ def _extract_sentences_in_range(segments: list, start: float, end: float) -> lis
 
 
 def _pick_font(language: str) -> str:
+    # System-font names. libass picks the first installed match; the Mac
+    # names work on dev laptops, the Noto names work in the Linux container.
     if language in {"hi", "mr", "ne", "sa"}:
-        return "Kohinoor Devanagari"
+        return "Kohinoor Devanagari,Noto Sans Devanagari,Noto Sans"
     if language in {"ta"}:
-        return "Tamil Sangam MN"
+        return "Tamil Sangam MN,Noto Sans Tamil,Noto Sans"
     if language in {"te"}:
-        return "Kohinoor Telugu"
-    return "Montserrat"
+        return "Kohinoor Telugu,Noto Sans Telugu,Noto Sans"
+    if language in {"bn"}:
+        return "Noto Sans Bengali,Noto Sans"
+    if language in {"gu"}:
+        return "Noto Sans Gujarati,Noto Sans"
+    if language in {"pa"}:
+        return "Noto Sans Gurmukhi,Noto Sans"
+    if language in {"kn"}:
+        return "Noto Sans Kannada,Noto Sans"
+    if language in {"ml"}:
+        return "Noto Sans Malayalam,Noto Sans"
+    return "Montserrat,Noto Sans,DejaVu Sans"
 
 
 def _format_ass_time(seconds: float) -> str:
