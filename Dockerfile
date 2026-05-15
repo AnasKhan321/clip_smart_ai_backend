@@ -42,7 +42,9 @@ RUN mkdir -p /app/storage/jobs
 ENV PORT=8000
 EXPOSE 8000
 
-# Single-container deploy: supervisord runs the API and the Celery worker
-# together. Both processes share the container's RAM/CPU — if you hit OOMs
-# either lower CELERY_CONCURRENCY or split into two services.
-CMD ["supervisord", "-c", "/app/supervisord.conf"]
+# Single-container deploy: a small shell entrypoint spawns the Celery worker
+# in the background, then runs uvicorn in the foreground as PID 1's child.
+# This avoids supervisord — which can hide crashes on Railway — while still
+# keeping both processes alive in one container. If the worker dies, the
+# container stays up via uvicorn; check logs and restart manually.
+CMD ["sh", "-c", "celery -A celery_app worker --loglevel=INFO --concurrency=${CELERY_CONCURRENCY:-2} --without-mingle --without-gossip --without-heartbeat & exec uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
