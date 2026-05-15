@@ -1,10 +1,9 @@
 #!/bin/bash
 # Multi-process launcher for single-container Railway deploys.
 #
-# Starts the Celery worker in the background and uvicorn in the foreground.
-# If either process exits, we exit too so the orchestrator can restart the
-# whole container — no half-alive states where the API is up but the worker
-# is dead (which would leave jobs stuck forever in 'pending').
+# Celery worker runs in the background; uvicorn replaces the shell as PID 2
+# under tini. tini (PID 1) reaps the backgrounded celery zombie and forwards
+# signals to uvicorn cleanly. When uvicorn exits, tini exits, container exits.
 set -e
 
 : "${PORT:=8000}"
@@ -17,25 +16,6 @@ celery -A celery_app worker \
     --without-mingle \
     --without-gossip \
     --without-heartbeat &
-WORKER_PID=$!
 
 echo "[start.sh] launching uvicorn on 0.0.0.0:${PORT}"
-uvicorn main:app --host 0.0.0.0 --port "${PORT}" &
-WEB_PID=$!
-
-# Trap signals — forward to children so graceful shutdown works.
-shutdown() {
-    echo "[start.sh] received shutdown signal, stopping children"
-    kill -TERM "$WORKER_PID" "$WEB_PID" 2>/dev/null || true
-    wait "$WORKER_PID" "$WEB_PID" 2>/dev/null || true
-    exit 0
-}
-trap shutdown TERM INT
-
-# Wait for either child to exit. If one dies, exit so the container restarts.
-wait -n "$WORKER_PID" "$WEB_PID"
-EXIT_CODE=$?
-echo "[start.sh] a child process exited with code ${EXIT_CODE}, shutting down"
-kill -TERM "$WORKER_PID" "$WEB_PID" 2>/dev/null || true
-wait "$WORKER_PID" "$WEB_PID" 2>/dev/null || true
-exit "$EXIT_CODE"
+exec uvicorn main:app --host 0.0.0.0 --port "${PORT}"
