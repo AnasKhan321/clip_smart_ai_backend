@@ -2,7 +2,7 @@ import os
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from celery import Celery
 from dotenv import load_dotenv
-
+#anas is gay
 load_dotenv()
 
 
