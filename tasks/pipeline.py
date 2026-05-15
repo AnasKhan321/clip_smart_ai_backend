@@ -222,11 +222,14 @@ def run_full_pipeline(self, job_id: str, options: dict):
             meta = download_video(job.source_url, job_id,
                                   progress_callback=dl_progress)
         else:
-            from services.downloader import _extract_audio, _get_duration, get_job_dir
+            from services.downloader import (
+                _extract_audio, _get_duration, _needs_wav_extraction, get_job_dir,
+            )
             job_dir = get_job_dir(job_id)
             video_path = job_dir / "original.mp4"
             audio_path = job_dir / "audio.wav"
-            _extract_audio(str(video_path), str(audio_path))
+            if _needs_wav_extraction():
+                _extract_audio(str(video_path), str(audio_path))
             try:
                 duration = _get_duration(str(video_path))
             except Exception:

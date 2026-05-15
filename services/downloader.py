@@ -146,7 +146,11 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         raise FileNotFoundError("Download completed but video file not found")
 
     audio_path = job_dir / "audio.wav"
-    _extract_audio(str(video_path), str(audio_path))
+    # AssemblyAI accepts mp4 directly — skip the local WAV extraction (saves
+    # ~30s of ffmpeg work + ~10× upload size). Other providers (local whisper,
+    # openai, pyannote diarizer) still need a separate WAV.
+    if _needs_wav_extraction():
+        _extract_audio(str(video_path), str(audio_path))
 
     if progress_callback:
         progress_callback(100)
@@ -156,6 +160,12 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         "video_path": str(video_path),
         "audio_path": str(audio_path),
     }
+
+
+def _needs_wav_extraction() -> bool:
+    provider = os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
+    # AssemblyAI ingests source video directly. Everything else needs a WAV.
+    return provider != "assemblyai"
 
 
 def save_uploaded_file(file_bytes: bytes, filename: str, job_id: str) -> dict:

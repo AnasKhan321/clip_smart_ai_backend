@@ -171,12 +171,29 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
         ) from exc
 
     storage = os.getenv("STORAGE_PATH", "./storage")
-    audio_path = Path(storage) / "jobs" / job_id / "audio.wav"
-    transcript_path = Path(storage) / "jobs" / job_id / "transcript.json"
-    diarization_path = Path(storage) / "jobs" / job_id / "diarization.json"
+    job_dir = Path(storage) / "jobs" / job_id
+    transcript_path = job_dir / "transcript.json"
+    diarization_path = job_dir / "diarization.json"
 
-    if not audio_path.exists():
-        raise FileNotFoundError(f"Audio file not found: {audio_path}")
+    # Prefer original.mp4 directly — AssemblyAI accepts video and decodes
+    # server-side. Skipping the local WAV extract saves a full ffmpeg pass
+    # AND ~10× upload size (50MB mp4 vs 600MB WAV for a 1hr video).
+    source_path = job_dir / "original.mp4"
+    if not source_path.exists():
+        # Fallback: legacy path or alternate extension
+        for ext in ("mkv", "webm", "m4a"):
+            cand = job_dir / f"original.{ext}"
+            if cand.exists():
+                source_path = cand
+                break
+        else:
+            audio_fallback = job_dir / "audio.wav"
+            if audio_fallback.exists():
+                source_path = audio_fallback
+            else:
+                raise FileNotFoundError(
+                    f"No source media for transcription in {job_dir}"
+                )
 
     api_key = os.getenv("ASSEMBLYAI_API_KEY")
     if not api_key:
@@ -194,7 +211,7 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
         cfg_kwargs["language_code"] = language
 
     config = aai.TranscriptionConfig(**cfg_kwargs)
-    result = aai.Transcriber().transcribe(str(audio_path), config=config)
+    result = aai.Transcriber().transcribe(str(source_path), config=config)
 
     if result.status == aai.TranscriptStatus.error:
         raise RuntimeError(f"AssemblyAI error: {result.error}")
