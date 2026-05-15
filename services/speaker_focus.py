@@ -11,7 +11,8 @@ from typing import List, Optional
 from services.media_tools import ffmpeg_path, ffprobe_path
 
 _SAMPLE_FPS = 2.0
-_EMA_ALPHA = 0.18
+_EMA_ALPHA = 0.08
+_DEADBAND = 0.015  # normalized; skip micro-moves smaller than this
 
 
 def focus_track_path(job_id: str) -> Path:
@@ -47,10 +48,29 @@ def compute_focus_track(job_id: str, progress_callback=None) -> List[dict]:
         _save_track(job_id, [])
         return []
 
-    width, height, duration = _probe_video(str(source))
+    _, _, duration = _probe_video(str(source))
     if duration <= 0:
         _save_track(job_id, [])
         return []
+
+    # Single-speaker shortcut: skip face detection entirely. Static center-upper
+    # crop is plenty for solo talking-head content and saves the expensive
+    # frame extract + Haar pass.
+    try:
+        from services.diarizer import load_diarization
+        _turns = load_diarization(job_id) or []
+    except Exception:
+        _turns = []
+    _unique_speakers = {t.get("speaker") for t in _turns if t.get("speaker")}
+    if _turns and len(_unique_speakers) == 1:
+        static_track = [
+            {"t": 0.0, "cx": 0.5, "cy": 0.4, "fh": 0.22},
+            {"t": float(round(duration, 3)), "cx": 0.5, "cy": 0.4, "fh": 0.22},
+        ]
+        _save_track(job_id, static_track)
+        if progress_callback:
+            progress_callback(100)
+        return static_track
 
     frames_dir = Path(storage) / "jobs" / job_id / "_focus_frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -85,6 +105,9 @@ def compute_focus_track(job_id: str, progress_callback=None) -> List[dict]:
     _SWITCH_FRAMES = 3   # frames challenger must dominate before we switch
 
     raw_track = []
+    # Per-frame face record for post-pass diarization mapping.
+    # frame_records[i] = {"t": float, "faces": [{fid, cx, cy, fh, lip}]}
+    frame_records: list = []
 
     for idx, fpath in enumerate(frame_files):
         t = idx / _SAMPLE_FPS
@@ -149,7 +172,7 @@ def compute_focus_track(job_id: str, progress_callback=None) -> List[dict]:
             faces.append({"fid": fid, "cx": cand["cx"], "cy": cand["cy"],
                           "fh": cand["fh"], "score": score,
                           "fx": cand["fx"], "fy": cand["fy"],
-                          "fw": cand["fw"]})
+                          "fw": cand["fw"], "lip": lip_score})
 
         # Update face state (position + lip crop).
         for face in faces:
@@ -198,6 +221,19 @@ def compute_focus_track(job_id: str, progress_callback=None) -> List[dict]:
             "cy": float(round(active_face["cy"], 4)),
             "fh": float(round(active_face["fh"], 4)),
         })
+        frame_records.append({
+            "t": float(round(t, 3)),
+            "faces": [
+                {
+                    "fid": f["fid"],
+                    "cx": float(f["cx"]),
+                    "cy": float(f["cy"]),
+                    "fh": float(f["fh"]),
+                    "lip": float(f["lip"]),
+                }
+                for f in faces
+            ],
+        })
 
         if progress_callback and idx % 20 == 0:
             progress_callback(int(80 * idx / max(1, len(frame_files))))
@@ -212,6 +248,22 @@ def compute_focus_track(job_id: str, progress_callback=None) -> List[dict]:
         frames_dir.rmdir()
     except OSError:
         pass
+
+    # Diarization-guided remap: assign each speaker label to a face_id by
+    # accumulating lip-motion within their turns, then rebuild track to follow
+    # the diarized active speaker at each timestamp.
+    try:
+        from services.diarizer import load_diarization
+        turns = load_diarization(job_id) or []
+    except Exception:
+        turns = []
+
+    if turns and frame_records:
+        speaker_fid = _map_speakers_to_faces(frame_records, turns)
+        if speaker_fid:
+            diar_track = _build_diarized_track(frame_records, turns, speaker_fid, raw_track)
+            if diar_track:
+                raw_track = diar_track
 
     smoothed = _smooth_track(raw_track)
     _save_track(job_id, smoothed)
@@ -246,16 +298,97 @@ def _lip_motion_score_stable(img, fx: float, fy: float, fw: float, fh: float, pr
     return float(diff.mean()) / 255.0
 
 
+def _map_speakers_to_faces(frame_records: list, turns: list) -> dict:
+    """For each diarized speaker, pick the face_id with highest cumulative
+    (lip_motion * area) score during that speaker's turns.
+
+    Returns {speaker_label: fid}.
+    """
+    # speaker -> fid -> score
+    tally: dict = {}
+    fi = 0
+    for turn in turns:
+        s, e, spk = turn["start"], turn["end"], turn["speaker"]
+        while fi < len(frame_records) and frame_records[fi]["t"] < s:
+            fi += 1
+        j = fi
+        while j < len(frame_records) and frame_records[j]["t"] <= e:
+            for f in frame_records[j]["faces"]:
+                score = (f["lip"] + 0.05) * (f["fh"] ** 2)
+                tally.setdefault(spk, {}).setdefault(f["fid"], 0.0)
+                tally[spk][f["fid"]] += score
+            j += 1
+
+    mapping: dict = {}
+    used_fids: set = set()
+    # Assign greedily by strongest speaker-fid affinity first to avoid two
+    # speakers claiming the same face when one is clearly more dominant.
+    pairs = [
+        (spk, fid, sc)
+        for spk, by_fid in tally.items()
+        for fid, sc in by_fid.items()
+    ]
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    for spk, fid, _ in pairs:
+        if spk in mapping or fid in used_fids:
+            continue
+        mapping[spk] = fid
+        used_fids.add(fid)
+    return mapping
+
+
+def _build_diarized_track(frame_records: list, turns: list, speaker_fid: dict,
+                           fallback_track: List[dict]) -> List[dict]:
+    """At each sampled timestamp, look up active speaker → mapped face_id →
+    that face's position. Fallback to highest-score face if unmapped/absent.
+    """
+    # Pair frame_records with fallback by index (both built in same loop order)
+    # to avoid float-key fragility.
+    out = []
+    ti = 0
+    for ri, rec in enumerate(frame_records):
+        t = rec["t"]
+        fb = fallback_track[ri] if ri < len(fallback_track) else None
+        while ti < len(turns) and turns[ti]["end"] < t:
+            ti += 1
+        active_spk = None
+        if ti < len(turns) and turns[ti]["start"] <= t <= turns[ti]["end"]:
+            active_spk = turns[ti]["speaker"]
+        target_fid = speaker_fid.get(active_spk) if active_spk else None
+        face = None
+        if target_fid is not None:
+            face = next((f for f in rec["faces"] if f["fid"] == target_fid), None)
+        if face is None:
+            if fb is None:
+                continue
+            out.append(fb)
+            continue
+        out.append({
+            "t": t,
+            "cx": float(round(face["cx"], 4)),
+            "cy": float(round(face["cy"], 4)),
+            "fh": float(round(face["fh"], 4)),
+        })
+    return out
+
+
 def _smooth_track(track: List[dict]) -> List[dict]:
     if not track:
         return []
     out = []
     cx, cy, fh = track[0]["cx"], track[0]["cy"], track[0].get("fh", 0.2)
+    # Held position emitted to track; only updated when smoothed value drifts
+    # outside the deadband. Suppresses sub-pixel wobble from Haar bbox jitter.
+    held_cx, held_cy = cx, cy
     for pt in track:
         cx = _EMA_ALPHA * pt["cx"] + (1 - _EMA_ALPHA) * cx
         cy = _EMA_ALPHA * pt["cy"] + (1 - _EMA_ALPHA) * cy
         fh = _EMA_ALPHA * pt.get("fh", fh) + (1 - _EMA_ALPHA) * fh
-        out.append({"t": float(pt["t"]), "cx": float(round(cx, 4)), "cy": float(round(cy, 4)), "fh": float(round(fh, 4))})
+        if abs(cx - held_cx) > _DEADBAND:
+            held_cx = cx
+        if abs(cy - held_cy) > _DEADBAND:
+            held_cy = cy
+        out.append({"t": float(pt["t"]), "cx": float(round(held_cx, 4)), "cy": float(round(held_cy, 4)), "fh": float(round(fh, 4))})
     return out
 
 
@@ -328,9 +461,20 @@ def build_crop_expression(clip_track: List[dict], src_w: int, src_h: int, target
     crop_w -= crop_w % 2
     crop_h -= crop_h % 2
 
-    # Cap keyframes for ffmpeg expression reliability.
-    pts = clip_track
+    # Cap keyframes for ffmpeg expression reliability. Pick points where the
+    # crop position actually changes — avoids panning between near-identical
+    # neighbors that produces visible side-to-side wobble.
     MAX_KEYS = 8
+    MOVE_THRESHOLD = 0.02  # normalized; ignore sub-2% shifts
+    pts = [clip_track[0]]
+    last = clip_track[0]
+    for pt in clip_track[1:]:
+        if (abs(pt["cx"] - last["cx"]) > MOVE_THRESHOLD or
+                abs(pt["cy"] - last["cy"]) > MOVE_THRESHOLD):
+            pts.append(pt)
+            last = pt
+    if pts[-1]["t"] != clip_track[-1]["t"]:
+        pts.append(clip_track[-1])
     if len(pts) > MAX_KEYS:
         idxs = [int(i * (len(pts) - 1) / (MAX_KEYS - 1)) for i in range(MAX_KEYS)]
         pts = [pts[i] for i in idxs]
