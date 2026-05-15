@@ -23,7 +23,9 @@ def get_job_dir(job_id: str) -> Path:
 _BACKEND_DIR = Path(__file__).resolve().parent.parent  # backend/
 
 
-def _resolve_cookie_path(p: str) -> str | None:
+from typing import Optional
+
+def _resolve_cookie_path(p: str) -> Optional[str]:
     """Resolve relative cookie paths against backend dir + common roots."""
     pth = Path(p).expanduser()
     if pth.is_absolute():
@@ -40,7 +42,7 @@ def _resolve_cookie_path(p: str) -> str | None:
     return None
 
 
-def _get_cookie_file() -> str | None:
+def _get_cookie_file() -> Optional[str]:
     """
     Returns path to Netscape-format cookie file, or None.
     YTDLP_COOKIE_FILES=a.txt,b.txt  → picks one at random (rotation)

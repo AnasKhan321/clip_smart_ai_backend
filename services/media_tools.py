@@ -7,7 +7,9 @@ class MediaToolMissingError(RuntimeError):
     pass
 
 
-def _first_existing(candidates: list[str]) -> str | None:
+from typing import Optional
+
+def _first_existing(candidates: list[str]) -> Optional[str]:
     for candidate in candidates:
         if not candidate:
             continue
