@@ -257,6 +257,8 @@ def _download_via_rapidapi(api_key: str, source_url: str, job_dir: Path,
         headers={
             "x-rapidapi-key": api_key,
             "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com",
+            "User-Agent": "Mozilla/5.0 (compatible; clipforge/1.0)",
+            "Accept": "application/json",
         },
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
