@@ -73,6 +73,24 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     job_dir = get_job_dir(job_id)
     output_template = str(job_dir / "original.%(ext)s")
 
+    # Try cobalt first if configured. Bypasses yt-dlp's YouTube cookie hell.
+    cobalt_url = os.getenv("COBALT_API_URL")
+    if cobalt_url:
+        try:
+            meta = _download_via_cobalt(cobalt_url, url, job_dir, progress_callback)
+            video_path = _find_video_file(job_dir)
+            if video_path and _has_audio_stream(str(video_path)):
+                audio_path = job_dir / "audio.wav"
+                if _needs_wav_extraction():
+                    _extract_audio(str(video_path), str(audio_path))
+                meta["duration"] = _get_duration(str(video_path))
+                if progress_callback:
+                    progress_callback(100)
+                return {**meta, "video_path": str(video_path), "audio_path": str(audio_path)}
+            print("[downloader] cobalt returned file without audio, falling back to yt-dlp", flush=True)
+        except Exception as exc:
+            print(f"[downloader] cobalt failed ({exc}), falling back to yt-dlp", flush=True)
+
     def ydl_progress_hook(d):
         if d["status"] == "downloading" and progress_callback:
             total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
@@ -173,6 +191,52 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         "video_path": str(video_path),
         "audio_path": str(audio_path),
     }
+
+
+def _download_via_cobalt(api_url: str, source_url: str, job_dir: Path,
+                          progress_callback=None) -> dict:
+    """POST URL to cobalt → get tunnel URL → stream download to job_dir.
+
+    Returns metadata dict (title, duration). Raises on any failure so caller
+    can fall back to yt-dlp.
+    """
+    import urllib.request
+    import urllib.error
+
+    api_url = api_url.rstrip("/")
+    req_body = json.dumps({"url": source_url, "videoQuality": "1080"}).encode("utf-8")
+    req = urllib.request.Request(
+        api_url + "/",
+        data=req_body,
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    status = data.get("status")
+    if status not in ("tunnel", "redirect"):
+        raise RuntimeError(f"cobalt status={status}: {data.get('error', {}).get('code', 'unknown')}")
+
+    tunnel_url = data["url"]
+    filename = data.get("filename", "original.mp4")
+    ext = Path(filename).suffix.lstrip(".") or "mp4"
+    out_path = job_dir / f"original.{ext}"
+
+    with urllib.request.urlopen(tunnel_url, timeout=600) as resp:
+        total = int(resp.headers.get("Content-Length", 0))
+        downloaded = 0
+        with open(out_path, "wb") as f:
+            while True:
+                chunk = resp.read(1024 * 256)
+                if not chunk:
+                    break
+                f.write(chunk)
+                downloaded += len(chunk)
+                if total > 0 and progress_callback:
+                    progress_callback(int(downloaded / total * 80))
+
+    return {"title": Path(filename).stem, "duration": 0}
 
 
 def _has_audio_stream(video_path: str) -> bool:
