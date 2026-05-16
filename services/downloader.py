@@ -199,8 +199,15 @@ def save_uploaded_file(file_bytes: bytes, filename: str, job_id: str) -> dict:
     with open(video_path, "wb") as f:
         f.write(file_bytes)
 
+    if not _has_audio_stream(str(video_path)):
+        raise RuntimeError(
+            f"Uploaded file '{filename}' has no audio stream. "
+            "Captions and analysis require audio — re-encode with audio or upload a different file."
+        )
+
     audio_path = job_dir / "audio.wav"
-    _extract_audio(str(video_path), str(audio_path))
+    if _needs_wav_extraction():
+        _extract_audio(str(video_path), str(audio_path))
 
     duration = _get_duration(str(video_path))
     return {
