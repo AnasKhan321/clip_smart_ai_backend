@@ -305,12 +305,19 @@ def _download_via_rapidapi(api_key: str, source_url: str, job_dir: Path,
                         break
                     f.write(chunk)
 
+    # Parallel download — video and audio streams are independent CDN URLs,
+    # downloading sequentially wastes wall time. Threads here are fine since
+    # the work is network I/O (releases GIL).
+    from concurrent.futures import ThreadPoolExecutor
     if progress_callback:
         progress_callback(10)
-    _fetch(video_fmt["url"], vid_path)
-    if progress_callback:
-        progress_callback(50)
-    _fetch(audio_fmt["url"], aud_path)
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        futs = [
+            ex.submit(_fetch, video_fmt["url"], vid_path),
+            ex.submit(_fetch, audio_fmt["url"], aud_path),
+        ]
+        for f in futs:
+            f.result()
     if progress_callback:
         progress_callback(70)
 
