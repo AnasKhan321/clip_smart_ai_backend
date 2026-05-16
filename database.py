@@ -35,6 +35,8 @@ _PENDING_COLUMNS = [
     ("clips", "error_message", "VARCHAR"),
     ("jobs", "source_width", "INTEGER"),
     ("jobs", "source_height", "INTEGER"),
+    ("jobs", "r2_source_key", "VARCHAR"),
+    ("clips", "r2_clip_key", "VARCHAR"),
 ]
 
 

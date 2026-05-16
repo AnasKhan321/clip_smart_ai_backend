@@ -71,6 +71,10 @@ class Job(Base):
     source_filename = Column(String, nullable=True)
     source_type = Column(String)  # "url" | "upload"
 
+    # R2 key for the source video (original.mp4). Set when upload goes
+    # browser→R2 directly, or after URL download finishes and is mirrored.
+    r2_source_key = Column(String, nullable=True)
+
     status = Column(String, default="pending")
     # pending → downloading → transcribing → diarizing → analyzing → clipping → ready | failed
 
@@ -116,6 +120,10 @@ class Clip(Base):
 
     raw_clip_path = Column(String, nullable=True)
     final_clip_path = Column(String, nullable=True)
+
+    # R2 key for the rendered clip mp4. When set, downloads/streams redirect
+    # to R2 (CDN) instead of streaming bytes through the backend.
+    r2_clip_key = Column(String, nullable=True)
 
     user_start_seconds = Column(Float, nullable=True)
     user_end_seconds = Column(Float, nullable=True)

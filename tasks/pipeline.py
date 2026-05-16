@@ -14,6 +14,7 @@ from services.diarizer import diarize
 from services.analyzer import analyze_transcript, find_more_clips
 from services.editor import render_and_caption_clip, probe_source_dims
 from services.credits import refund
+from services import r2
 
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,11 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
                 clip_row.final_clip_path = res["final_clip_path"]
                 clip_row.raw_clip_path = None  # No separate raw in single-pass
                 clip_row.status = "ready"
+                # Push to R2 in background — serve via CDN, free egress.
+                if r2.is_enabled() and res["final_clip_path"]:
+                    key = r2.clip_key(job_id, clip_row.rank)
+                    clip_row.r2_clip_key = key
+                    r2.upload_in_background(res["final_clip_path"], key)
             db.commit()
             done += 1
             pct = progress_offset + int(done / total * (100 - progress_offset))
@@ -221,12 +227,31 @@ def run_full_pipeline(self, job_id: str, options: dict):
         if job.source_type == "url":
             meta = download_video(job.source_url, job_id,
                                   progress_callback=dl_progress)
+            # Mirror original to R2 in background so future re-runs / serving
+            # don't need to re-download from YouTube.
+            if r2.is_enabled() and meta.get("video_path"):
+                key = r2.source_key(job_id)
+                r2.upload_in_background(meta["video_path"], key)
+                job_row = db.query(Job).filter(Job.id == job_id).first()
+                if job_row and not job_row.r2_source_key:
+                    job_row.r2_source_key = key
+                    db.commit()
         else:
             from services.downloader import (
                 _extract_audio, _get_duration, _needs_wav_extraction, get_job_dir,
             )
             job_dir = get_job_dir(job_id)
             video_path = job_dir / "original.mp4"
+
+            # New path: direct browser→R2 upload. Pull from R2 to scratch.
+            if job.r2_source_key and not video_path.exists():
+                if not r2.is_enabled():
+                    raise RuntimeError(
+                        "Job has r2_source_key but R2 is not configured")
+                _set_job_status(db, job_id, "downloading", 5)
+                r2.download_file(job.r2_source_key, str(video_path))
+                _set_job_status(db, job_id, "downloading", 80)
+
             audio_path = job_dir / "audio.wav"
             if _needs_wav_extraction():
                 _extract_audio(str(video_path), str(audio_path))

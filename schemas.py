@@ -21,6 +21,8 @@ class ClipOut(BaseModel):
     status: str
     raw_clip_path: Optional[str] = None
     final_clip_path: Optional[str] = None
+    r2_clip_key: Optional[str] = None
+    download_url: Optional[str] = None
     user_start_seconds: Optional[float] = None
     user_end_seconds: Optional[float] = None
     user_approved: bool

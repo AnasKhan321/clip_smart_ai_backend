@@ -1,6 +1,6 @@
 import os
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from database import get_db
 from models import Clip, Job, User
@@ -8,9 +8,21 @@ from schemas import ClipOut, ClipUpdate, ExportRequest
 from services.exporter import export_clip
 from services.transcriber import load_transcript
 from services.editor import render_and_caption_clip
+from services import r2
 from auth import get_current_user
 
 router = APIRouter()
+
+
+def serialize_clip(clip: Clip) -> ClipOut:
+    """Convert ORM Clip → ClipOut, populating download_url from R2 if available."""
+    out = ClipOut.model_validate(clip)
+    if clip.r2_clip_key and r2.is_enabled():
+        try:
+            out.download_url = r2.object_url(clip.r2_clip_key)
+        except Exception:
+            pass
+    return out
 
 
 def _owned_clip(clip_id: str, db: Session, user: User) -> Clip:
@@ -25,7 +37,7 @@ def _owned_clip(clip_id: str, db: Session, user: User) -> Clip:
 
 @router.get("/clips/{clip_id}", response_model=ClipOut)
 def get_clip(clip_id: str, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    return _owned_clip(clip_id, db, user)
+    return serialize_clip(_owned_clip(clip_id, db, user))
 
 
 @router.patch("/clips/{clip_id}", response_model=ClipOut)
@@ -105,6 +117,10 @@ def _rerender_clip(clip: Clip, db: Session):
         clip.final_clip_path = result["final_clip_path"]
         clip.raw_clip_path = None
         clip.status = "ready"
+        if r2.is_enabled() and result["final_clip_path"]:
+            key = r2.clip_key(clip.job_id, clip.rank)
+            clip.r2_clip_key = key
+            r2.upload_in_background(result["final_clip_path"], key)
 
     db.commit()
 
@@ -149,6 +165,14 @@ def stream_clip(clip_id: str, request: Request, db: Session = Depends(get_db)):
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
+
+    # Prefer R2: zero-egress CDN edge. Skip backend bandwidth entirely.
+    if clip.r2_clip_key and r2.is_enabled():
+        try:
+            return RedirectResponse(url=r2.object_url(clip.r2_clip_key),
+                                    status_code=307)
+        except Exception:
+            pass  # Fall back to local stream
 
     path = clip.final_clip_path
     if not path or not os.path.exists(path):
@@ -211,6 +235,14 @@ def download_clip(
     user: User = Depends(get_current_user),
 ):
     clip = _owned_clip(clip_id, db, user)
+
+    # Prefer R2: redirect to CDN. Frontend downloads direct from edge.
+    if clip.r2_clip_key and r2.is_enabled():
+        try:
+            return RedirectResponse(url=r2.object_url(clip.r2_clip_key),
+                                    status_code=307)
+        except Exception:
+            pass
 
     from services.editor import get_clips_dir
     export_file = str(get_clips_dir(clip.job_id) / f"clip_{clip.rank:03d}_export.mp4")

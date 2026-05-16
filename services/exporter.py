@@ -4,6 +4,7 @@ from pathlib import Path
 
 from services.editor import render_and_caption_clip
 from services.transcriber import load_transcript
+from services import r2
 
 
 def export_clip(job_id: str, clip: dict, options: dict) -> str:
@@ -56,5 +57,9 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
 
     if not Path(export_path).exists() or Path(export_path).stat().st_size < 1024:
         raise RuntimeError(f"Export produced empty or missing file: {export_path}")
+
+    if r2.is_enabled():
+        key = f"jobs/{job_id}/clips/clip_{rank:03d}_export.mp4"
+        r2.upload_in_background(export_path, key)
 
     return export_path

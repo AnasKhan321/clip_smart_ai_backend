@@ -20,6 +20,7 @@ google-auth==2.30.0
 assemblyai>=0.30.0
 # openai-whisper==20240930
 # pyannote.audio==3.3.1
+boto3==1.35.0
 opencv-python-headless>=4.9.0
 mediapipe>=0.10.14
 scenedetect>=0.6.3

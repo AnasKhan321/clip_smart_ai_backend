@@ -13,6 +13,7 @@ from tasks.pipeline import run_full_pipeline, run_more_clips
 from auth import get_current_user
 from services.credits import deduct, cost_for_job
 from services.media_tools import MediaToolMissingError, ffmpeg_path, ffprobe_path
+from services import r2
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -25,6 +26,141 @@ def run_task_in_background(task, *args):
 
     async_result = task.delay(*args)
     return {"mode": "celery", "task_id": async_result.id}
+
+
+# ── R2 direct-upload flow ───────────────────────────────────────────────────
+# Browser uploads original video direct-to-R2 via presigned multipart PUTs.
+# Backend never touches the bytes. Big win on Railway: no proxy bottleneck,
+# no ephemeral disk used for upload, no request-body memory spike.
+
+class PresignUploadIn(BaseModel):
+    filename: str
+    content_type: str = "video/mp4"
+    size_bytes: int = Field(gt=0)
+
+
+@router.post("/jobs/presign-upload")
+def presign_upload(
+    body: PresignUploadIn,
+    user: User = Depends(get_current_user),
+):
+    if not r2.is_enabled():
+        raise HTTPException(status_code=503,
+                            detail="R2 storage not configured on server")
+
+    max_mb = int(os.getenv("MAX_FILE_SIZE_MB", 2000))
+    if body.size_bytes > max_mb * 1024 * 1024:
+        raise HTTPException(status_code=413,
+                            detail=f"File exceeds {max_mb}MB limit")
+
+    chunk_size = 8 * 1024 * 1024  # 8 MB parts
+    part_count = max(1, (body.size_bytes + chunk_size - 1) // chunk_size)
+    if part_count > 10000:  # S3 hard limit
+        raise HTTPException(status_code=413,
+                            detail="File too large for multipart upload")
+
+    job_id = str(uuid4())
+    key = r2.source_key(job_id, ext="mp4")
+
+    init = r2.create_multipart_upload(key, content_type=body.content_type)
+    parts = r2.presign_part_urls(key, init["upload_id"], part_count, ttl=3600)
+
+    return {
+        "job_id": job_id,
+        "key": key,
+        "upload_id": init["upload_id"],
+        "part_size": chunk_size,
+        "part_count": part_count,
+        "parts": parts,  # [{part_number, url}]
+    }
+
+
+class CompletePartIn(BaseModel):
+    part_number: int
+    etag: str
+
+
+class JobFromR2In(BaseModel):
+    job_id: str
+    key: str
+    upload_id: str
+    parts: list[CompletePartIn]
+    filename: str
+    max_clips: int = 5
+    clip_types: list[str] = Field(default_factory=lambda: [
+        "controversy", "hook_intro", "quotable", "shocking_stat", "myth_bust"])
+    min_clip_duration: int = 20
+    max_clip_duration: int = 90
+    target_aspect_ratio: str = "9:16"
+
+
+class AbortUploadIn(BaseModel):
+    key: str
+    upload_id: str
+
+
+@router.post("/jobs/abort-upload")
+def abort_upload(body: AbortUploadIn, user: User = Depends(get_current_user)):
+    if r2.is_enabled():
+        r2.abort_multipart_upload(body.key, body.upload_id)
+    return {"ok": True}
+
+
+@router.post("/jobs/from-r2")
+def create_job_from_r2(
+    body: JobFromR2In,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Called after browser finishes uploading all parts to R2.
+
+    Completes the multipart upload, creates the Job row pointing at the
+    R2 key, charges credits, and dispatches the pipeline.
+    """
+    if not r2.is_enabled():
+        raise HTTPException(status_code=503, detail="R2 not configured")
+
+    try:
+        ffmpeg_path(); ffprobe_path()
+    except MediaToolMissingError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    try:
+        r2.complete_multipart_upload(
+            body.key, body.upload_id,
+            [{"part_number": p.part_number, "etag": p.etag} for p in body.parts],
+        )
+    except Exception as exc:
+        r2.abort_multipart_upload(body.key, body.upload_id)
+        raise HTTPException(status_code=400,
+                            detail=f"Failed to finalize R2 upload: {exc}")
+
+    cost = cost_for_job(body.max_clips)
+    job = Job(
+        id=body.job_id,
+        user_id=user.id,
+        source_url=None,
+        source_filename=body.filename,
+        source_type="upload",
+        r2_source_key=body.key,
+        status="pending",
+    )
+    db.add(job)
+    db.flush()
+    deduct(db, user, cost, job_id=body.job_id,
+           note=f"Job {body.job_id} ({body.max_clips} clips)")
+    db.commit()
+
+    options = {
+        "source_url": None,
+        "max_clips": body.max_clips,
+        "clip_types": body.clip_types,
+        "min_clip_duration": body.min_clip_duration,
+        "max_clip_duration": body.max_clip_duration,
+        "target_aspect_ratio": body.target_aspect_ratio,
+    }
+    dispatch = run_task_in_background(run_full_pipeline, body.job_id, options)
+    return {"job_id": body.job_id, "status": "pending", "dispatch": dispatch}
 
 
 @router.post("/jobs")
@@ -121,6 +257,7 @@ def list_jobs(
         .order_by(Job.created_at.desc())
         .all()
     )
+    from api.clips import serialize_clip
     out = []
     for j in jobs:
         clips = db.query(Clip).filter(Clip.job_id == j.id).order_by(Clip.rank).all()
@@ -129,7 +266,8 @@ def list_jobs(
             source_url=j.source_url, source_filename=j.source_filename, source_type=j.source_type,
             detected_language=j.detected_language, detected_topic=j.detected_topic,
             video_duration_seconds=j.video_duration_seconds, video_title=j.video_title,
-            error_message=j.error_message, clips=clips,
+            error_message=j.error_message,
+            clips=[serialize_clip(c) for c in clips],
             created_at=j.created_at, completed_at=j.completed_at,
         ))
     return out
@@ -147,6 +285,7 @@ def get_job(
     if job.user_id and job.user_id != user.id:
         raise HTTPException(status_code=403, detail="Not your job")
 
+    from api.clips import serialize_clip
     clips = db.query(Clip).filter(Clip.job_id == job_id).order_by(Clip.rank).all()
 
     return JobOut(
@@ -161,7 +300,7 @@ def get_job(
         video_duration_seconds=job.video_duration_seconds,
         video_title=job.video_title,
         error_message=job.error_message,
-        clips=clips,
+        clips=[serialize_clip(c) for c in clips],
         created_at=job.created_at,
         completed_at=job.completed_at,
     )
@@ -264,6 +403,10 @@ def _render_manual_clip_bg(clip_id: str):
             clip.final_clip_path = result["final_clip_path"]
             clip.raw_clip_path = None
             clip.status = "ready"
+            if r2.is_enabled() and result["final_clip_path"]:
+                key = r2.clip_key(clip.job_id, clip.rank)
+                clip.r2_clip_key = key
+                r2.upload_in_background(result["final_clip_path"], key)
         db.commit()
     finally:
         db.close()
