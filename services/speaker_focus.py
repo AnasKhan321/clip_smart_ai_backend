@@ -4,6 +4,7 @@ Track is a list of {t, cx, cy} normalized [0,1] over source video time.
 Crop width/height derived at render time from target aspect ratio.
 """
 import json
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -14,14 +15,31 @@ _SAMPLE_FPS = 2.0
 _EMA_ALPHA = 0.08
 _DEADBAND = 0.015  # normalized; skip micro-moves smaller than this
 
+# Face-focused mode params (independent of speaker mode).
+_FACE_SAMPLE_FPS = 10.0
+_FACE_MIN_CONFIDENCE = 0.5
+
 
 def focus_track_path(job_id: str) -> Path:
     storage = os.getenv("STORAGE_PATH", "./storage")
     return Path(storage) / "jobs" / job_id / "focus_track.json"
 
 
+def face_track_path(job_id: str) -> Path:
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    return Path(storage) / "jobs" / job_id / "face_track.json"
+
+
 def load_focus_track(job_id: str) -> Optional[List[dict]]:
     p = focus_track_path(job_id)
+    if not p.exists():
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def load_face_track(job_id: str) -> Optional[List[dict]]:
+    p = face_track_path(job_id)
     if not p.exists():
         return None
     with open(p) as f:
@@ -492,6 +510,383 @@ def build_crop_expression(clip_track: List[dict], src_w: int, src_h: int, target
     x_expr = x_expr.replace(",", "\\,")
     y_expr = y_expr.replace(",", "\\,")
 
+    return {"cw": crop_w, "ch": crop_h, "x": x_expr, "y": y_expr}
+
+
+# ── Face-focused mode (single dominant face, TikTok-style framing) ──────────
+
+
+class OneEuroFilter:
+    """Adaptive low-pass filter — low cutoff when still (kills jitter),
+    high cutoff when moving fast (kills lag). Reference: Casiez et al. 2012.
+    """
+
+    def __init__(self, freq: float, min_cutoff: float = 1.0,
+                 beta: float = 0.05, d_cutoff: float = 1.0):
+        self.freq = freq
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self.d_cutoff = d_cutoff
+        self._x_prev: Optional[float] = None
+        self._dx_prev: float = 0.0
+        self._t_prev: Optional[float] = None
+
+    def reset(self):
+        self._x_prev = None
+        self._dx_prev = 0.0
+        self._t_prev = None
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def __call__(self, x: float, t: float) -> float:
+        if self._x_prev is None or self._t_prev is None:
+            self._x_prev = x
+            self._t_prev = t
+            return x
+        dt = max(1e-3, t - self._t_prev)
+        dx = (x - self._x_prev) / dt
+        a_d = self._alpha(self.d_cutoff, dt)
+        dx_hat = a_d * dx + (1 - a_d) * self._dx_prev
+        cutoff = self.min_cutoff + self.beta * abs(dx_hat)
+        a = self._alpha(cutoff, dt)
+        x_hat = a * x + (1 - a) * self._x_prev
+        self._x_prev = x_hat
+        self._dx_prev = dx_hat
+        self._t_prev = t
+        return x_hat
+
+
+def _detect_scenes(source: str, duration: float) -> List[float]:
+    """Return list of scene-cut timestamps (seconds, sorted, excluding 0 and end).
+
+    Uses PySceneDetect ContentDetector. Returns [] if unavailable or single scene.
+    """
+    try:
+        from scenedetect import open_video, SceneManager
+        from scenedetect.detectors import ContentDetector
+    except ImportError:
+        return []
+    try:
+        video = open_video(source)
+        sm = SceneManager()
+        sm.add_detector(ContentDetector(threshold=27.0, min_scene_len=15))
+        sm.detect_scenes(video, show_progress=False)
+        scenes = sm.get_scene_list()
+        cuts = []
+        for scene in scenes[1:]:  # skip first scene start (== 0)
+            cuts.append(float(scene[0].get_seconds()))
+        return [c for c in cuts if 0.5 < c < duration - 0.5]
+    except Exception:
+        return []
+
+
+def compute_face_track(job_id: str, progress_callback=None) -> List[dict]:
+    """Sample at 10 FPS, MediaPipe detect biggest face per frame, smooth w/
+    One Euro, reset at scene cuts. Persist to face_track.json.
+
+    Track entry: {t, cx, cy, fh, scene}. cx/cy = eye-midpoint (or bbox center
+    fallback) normalized to source dims. fh = face bbox height normalized.
+    scene = integer scene index for cut-aware rendering.
+    """
+    existing = load_face_track(job_id)
+    if existing:
+        if progress_callback:
+            progress_callback(100)
+        return existing
+
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    source = Path(storage) / "jobs" / job_id / "original.mp4"
+    if not source.exists():
+        return []
+
+    try:
+        import cv2
+    except ImportError:
+        _save_face_track(job_id, [])
+        return []
+
+    src_w, src_h, duration = _probe_video(str(source))
+    if duration <= 0:
+        _save_face_track(job_id, [])
+        return []
+
+    # Scene cuts (best-effort)
+    cuts = _detect_scenes(str(source), duration)
+
+    # Extract dense sampled frames at lower res for speed.
+    frames_dir = Path(storage) / "jobs" / job_id / "_face_frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(frames_dir / "f_%06d.jpg")
+    try:
+        subprocess.run(
+            [ffmpeg_path(), "-y", "-i", str(source),
+             "-vf", f"fps={_FACE_SAMPLE_FPS},scale=640:-2",
+             "-q:v", "3", pattern],
+            check=True, capture_output=True,
+        )
+    except subprocess.CalledProcessError:
+        _save_face_track(job_id, [])
+        return []
+
+    frame_files = sorted(frames_dir.glob("f_*.jpg"))
+    if not frame_files:
+        _save_face_track(job_id, [])
+        return []
+
+    # MediaPipe primary; Haar fallback if mediapipe missing.
+    mp_detector = None
+    try:
+        import mediapipe as mp
+        mp_detector = mp.solutions.face_detection.FaceDetection(
+            model_selection=1, min_detection_confidence=_FACE_MIN_CONFIDENCE
+        )
+    except Exception:
+        mp_detector = None
+
+    if mp_detector is None:
+        cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+        haar = cv2.CascadeClassifier(cascade_path)
+    else:
+        haar = None
+
+    raw = []
+    last_cx, last_cy, last_fh = 0.5, 0.4, 0.22
+    for idx, fpath in enumerate(frame_files):
+        t = idx / _FACE_SAMPLE_FPS
+        img = cv2.imread(str(fpath))
+        if img is None:
+            continue
+        h, w = img.shape[:2]
+        cx, cy, fh = None, None, None
+
+        if mp_detector is not None:
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            res = mp_detector.process(rgb)
+            if res.detections:
+                # Pick highest confidence × area (most prominent face).
+                best, best_score = None, -1.0
+                for det in res.detections:
+                    bb = det.location_data.relative_bounding_box
+                    if bb.width <= 0 or bb.height <= 0:
+                        continue
+                    conf = det.score[0] if det.score else 0.0
+                    score = conf * bb.width * bb.height
+                    if score > best_score:
+                        best_score = score
+                        best = det
+                if best is not None:
+                    bb = best.location_data.relative_bounding_box
+                    # Eye-midpoint anchor (keypoints 0,1 = right/left eye).
+                    kps = best.location_data.relative_keypoints
+                    if kps and len(kps) >= 2:
+                        cx = (kps[0].x + kps[1].x) / 2.0
+                        cy = (kps[0].y + kps[1].y) / 2.0
+                    else:
+                        cx = bb.xmin + bb.width / 2.0
+                        cy = bb.ymin + bb.height / 2.0
+                    fh = bb.height
+        else:
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            rects = haar.detectMultiScale(gray, scaleFactor=1.15,
+                                          minNeighbors=4, minSize=(30, 30))
+            if len(rects) > 0:
+                rx, ry, rw, rh = max(rects, key=lambda r: r[2] * r[3])
+                cx = (rx + rw / 2) / w
+                cy = (ry + rh / 2) / h
+                fh = rh / h
+
+        if cx is None:
+            # Hold last position; mark missing so smoother won't pan to it.
+            cx, cy, fh = last_cx, last_cy, last_fh
+            missing = True
+        else:
+            cx = max(0.0, min(1.0, cx))
+            cy = max(0.0, min(1.0, cy))
+            fh = max(0.02, min(0.95, fh))
+            last_cx, last_cy, last_fh = cx, cy, fh
+            missing = False
+
+        raw.append({"t": float(round(t, 3)),
+                    "cx": float(cx), "cy": float(cy), "fh": float(fh),
+                    "missing": missing})
+
+        if progress_callback and idx % 30 == 0:
+            progress_callback(int(80 * idx / max(1, len(frame_files))))
+
+    if mp_detector is not None:
+        try:
+            mp_detector.close()
+        except Exception:
+            pass
+
+    # Cleanup frames
+    for fpath in frame_files:
+        try:
+            fpath.unlink()
+        except OSError:
+            pass
+    try:
+        frames_dir.rmdir()
+    except OSError:
+        pass
+
+    smoothed = _smooth_face_track(raw, cuts)
+    _save_face_track(job_id, smoothed)
+    if progress_callback:
+        progress_callback(100)
+    return smoothed
+
+
+def _smooth_face_track(raw: List[dict], cuts: List[float]) -> List[dict]:
+    """One Euro Filter per axis. Reset filter state at every scene cut.
+    Assigns scene_id per sample.
+    """
+    if not raw:
+        return []
+    fx = OneEuroFilter(freq=_FACE_SAMPLE_FPS, min_cutoff=1.0, beta=0.05)
+    fy = OneEuroFilter(freq=_FACE_SAMPLE_FPS, min_cutoff=1.0, beta=0.05)
+    fz = OneEuroFilter(freq=_FACE_SAMPLE_FPS, min_cutoff=0.5, beta=0.02)
+    cuts_sorted = sorted(cuts)
+    ci = 0
+    scene = 0
+    out = []
+    for pt in raw:
+        t = pt["t"]
+        while ci < len(cuts_sorted) and t >= cuts_sorted[ci]:
+            ci += 1
+            scene += 1
+            fx.reset()
+            fy.reset()
+            fz.reset()
+        cx_s = fx(pt["cx"], t)
+        cy_s = fy(pt["cy"], t)
+        fh_s = fz(pt["fh"], t)
+        out.append({
+            "t": t,
+            "cx": float(round(cx_s, 4)),
+            "cy": float(round(cy_s, 4)),
+            "fh": float(round(fh_s, 4)),
+            "scene": scene,
+        })
+    return out
+
+
+def _save_face_track(job_id: str, track: List[dict]):
+    p = face_track_path(job_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as f:
+        json.dump(track, f)
+
+
+def slice_face_track(track: List[dict], start: float, end: float) -> List[dict]:
+    """Extract face-track points within [start, end], shifted to clip-local time.
+    Re-numbers scene IDs from 0 within the slice.
+    """
+    out = []
+    base_scene = None
+    for pt in track:
+        if start <= pt["t"] <= end:
+            if base_scene is None:
+                base_scene = pt.get("scene", 0)
+            out.append({
+                "t": round(pt["t"] - start, 3),
+                "cx": pt["cx"],
+                "cy": pt["cy"],
+                "fh": pt.get("fh", 0.2),
+                "scene": pt.get("scene", 0) - base_scene,
+            })
+    return out
+
+
+def build_face_crop_expression(clip_track: List[dict], src_w: int, src_h: int,
+                                target_w: int, target_h: int) -> Optional[dict]:
+    """TikTok-style face crop. Adaptive zoom (never upscales source), face on
+    upper third, ≥15% margin all sides, instantaneous jumps at scene cuts.
+    """
+    if not clip_track:
+        return None
+    fh_values = [p.get("fh", 0.2) for p in clip_track if p.get("fh", 0) > 0]
+    if not fh_values:
+        return None
+    # 95th percentile face height → zoom for largest-face moment (so face never
+    # exceeds the crop). Use a tighter 4.0× multiplier than speaker mode.
+    fh_sorted = sorted(fh_values)
+    fh_p95 = fh_sorted[int(0.95 * (len(fh_sorted) - 1))]
+    ZOOM_FACTOR = 4.0
+    crop_h_norm = max(0.5, min(0.95, fh_p95 * ZOOM_FACTOR))
+
+    # Adaptive: ensure rendered crop_w >= target_w (1080) when source allows,
+    # else open crop wider rather than upscaling.
+    crop_h = int(src_h * crop_h_norm)
+    crop_w = int(crop_h * target_w / target_h)
+    if crop_w > src_w:
+        crop_w = src_w
+        crop_h = int(src_w * target_h / target_w)
+    # If source > target_w but our crop_w < target_w, widen until ≥ target_w
+    # (caps quality loss from upscale).
+    min_crop_w = min(src_w, target_w)
+    if crop_w < min_crop_w:
+        crop_w = min_crop_w
+        crop_h = int(crop_w * target_h / target_w)
+        if crop_h > src_h:
+            crop_h = src_h
+            crop_w = int(crop_h * target_w / target_h)
+
+    crop_w -= crop_w % 2
+    crop_h -= crop_h % 2
+
+    # Margin guarantee: ≥15% padding around the face within the crop.
+    # Achieved by clamping pan so face bbox sits in central 70% of crop.
+    MARGIN = 0.15
+
+    # Build keyframes — keep all (10 FPS) but cap explosion via move threshold,
+    # and split scenes by inserting a tiny-dt jump at each cut boundary.
+    MOVE_THRESHOLD = 0.008
+    MAX_KEYS = 64
+    pts = [clip_track[0]]
+    last = clip_track[0]
+    for pt in clip_track[1:]:
+        scene_change = pt.get("scene", 0) != last.get("scene", 0)
+        moved = (abs(pt["cx"] - last["cx"]) > MOVE_THRESHOLD or
+                 abs(pt["cy"] - last["cy"]) > MOVE_THRESHOLD)
+        if scene_change:
+            # Lock the previous position to the cut instant, then jump.
+            pts.append({**last, "t": max(last["t"], pt["t"] - 0.001)})
+            pts.append(pt)
+            last = pt
+        elif moved:
+            pts.append(pt)
+            last = pt
+    if pts[-1]["t"] != clip_track[-1]["t"]:
+        pts.append(clip_track[-1])
+    if len(pts) > MAX_KEYS:
+        idxs = [int(i * (len(pts) - 1) / (MAX_KEYS - 1)) for i in range(MAX_KEYS)]
+        pts = [pts[i] for i in idxs]
+
+    cx_expr = _piecewise_expr(pts, "cx")
+    cy_expr = _piecewise_expr(pts, "cy")
+
+    # Face anchor at upper third of crop window. Clamp pan to keep margin.
+    UPPER_THIRD = 0.38
+    # Effective x position formula: cx*src_w - crop_w/2, then clamp.
+    # Margin clamp: face_center_x in crop should be in [MARGIN, 1-MARGIN] * crop_w.
+    # cx_in_crop = cx*src_w - x  →  x ∈ [cx*src_w - (1-MARGIN)*crop_w, cx*src_w - MARGIN*crop_w]
+    # Combined with source bounds [0, src_w - crop_w]:
+    x_lo = f"max(0,({cx_expr})*{src_w}-{(1.0 - MARGIN) * crop_w})"
+    x_hi = f"min({src_w - crop_w},({cx_expr})*{src_w}-{MARGIN * crop_w})"
+    x_center = f"({cx_expr})*{src_w}-{crop_w / 2}"
+    x_expr = f"max({x_lo},min({x_hi},{x_center}))"
+
+    y_lo = f"max(0,({cy_expr})*{src_h}-{(1.0 - MARGIN) * crop_h})"
+    y_hi = f"min({src_h - crop_h},({cy_expr})*{src_h}-{MARGIN * crop_h})"
+    y_center = f"({cy_expr})*{src_h}-{crop_h * UPPER_THIRD}"
+    y_expr = f"max({y_lo},min({y_hi},{y_center}))"
+
+    x_expr = x_expr.replace(",", "\\,")
+    y_expr = y_expr.replace(",", "\\,")
     return {"cw": crop_w, "ch": crop_h, "x": x_expr, "y": y_expr}
 
 

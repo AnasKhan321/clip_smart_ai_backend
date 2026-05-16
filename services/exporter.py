@@ -12,11 +12,17 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     caption_style = options.get("caption_style", "word_highlight")
     focus_mode = options.get("focus_mode", "none")
 
-    # Compute focus track lazily on first speaker-mode export.
+    # Compute focus / face track lazily on first export of each mode.
     if focus_mode == "speaker":
         from services.speaker_focus import compute_focus_track
         try:
             compute_focus_track(job_id)
+        except Exception:
+            focus_mode = "none"
+    elif focus_mode == "face":
+        from services.speaker_focus import compute_face_track
+        try:
+            compute_face_track(job_id)
         except Exception:
             focus_mode = "none"
 
@@ -33,6 +39,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         transcript = None
 
     # Single-pass: cut + aspect transform + captions all in one ffmpeg call
+    render_profile = "face_export" if focus_mode == "face" else "export"
     result = render_and_caption_clip(
         job_id, clip,
         aspect_ratio=aspect_ratio,
@@ -40,7 +47,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         caption_style=caption_style,
         include_captions=include_captions and transcript is not None,
         transcript=transcript,
-        profile="export",
+        profile=render_profile,
     )
     if result["error"]:
         raise RuntimeError(f"Export render failed: {result['error']}")

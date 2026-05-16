@@ -21,4 +21,5 @@ assemblyai>=0.30.0
 # openai-whisper==20240930
 # pyannote.audio==3.3.1
 opencv-python-headless>=4.9.0
-# mediapipe>=0.10.14   # disabled: not used in code, ~250MB bloat
+mediapipe>=0.10.14
+scenedetect>=0.6.3

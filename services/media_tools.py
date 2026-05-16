@@ -123,26 +123,48 @@ def detect_hwaccel() -> Optional[str]:
 
 
 def encoder_video_opts(profile: str = "preview") -> list[str]:
-    """FFmpeg -c:v + tuning args. profile: 'preview' (fast) or 'export' (quality)."""
+    """FFmpeg -c:v + tuning args. profile: 'preview' | 'export' | 'face_export'.
+
+    face_export pushes max quality for face-focused renders (CRF 18, slow preset,
+    higher hw bitrate) since the crop window may upscale source pixels.
+    """
     hw = detect_hwaccel()
     if hw == "h264_videotoolbox":
-        bitrate = "8M" if profile == "export" else "4M"
-        return ["-c:v", "h264_videotoolbox", "-b:v", bitrate, "-allow_sw", "1",
+        if profile == "face_export":
+            bitrate = "12M"
+        elif profile == "export":
+            bitrate = "8M"
+        else:
+            bitrate = "4M"
+        opts = ["-c:v", "h264_videotoolbox", "-b:v", bitrate, "-allow_sw", "1",
                 "-pix_fmt", "yuv420p"]
+        if profile == "face_export":
+            opts += ["-q:v", "60"]
+        return opts
     if hw == "h264_nvenc":
-        cq = "20" if profile == "export" else "26"
-        return ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+        if profile == "face_export":
+            cq, preset = "19", "p6"
+        elif profile == "export":
+            cq, preset = "20", "p4"
+        else:
+            cq, preset = "26", "p4"
+        return ["-c:v", "h264_nvenc", "-preset", preset, "-tune", "hq",
                 "-cq", cq, "-pix_fmt", "yuv420p"]
     if hw == "h264_qsv":
-        q = "20" if profile == "export" else "26"
+        q = "18" if profile == "face_export" else ("20" if profile == "export" else "26")
         return ["-c:v", "h264_qsv", "-global_quality", q, "-pix_fmt", "yuv420p"]
     if hw == "h264_amf":
-        q = "20" if profile == "export" else "26"
+        q = "18" if profile == "face_export" else ("20" if profile == "export" else "26")
         return ["-c:v", "h264_amf", "-quality", "balanced", "-qp_i", q,
                 "-pix_fmt", "yuv420p"]
     # libx264 fallback. Cap threads-per-process so N parallel workers don't
     # collectively oversubscribe the CPU. ffmpeg defaults to all cores per
     # process which thrashes under ThreadPoolExecutor.
+    if profile == "face_export":
+        crf, preset = "18", "slow"
+        threads = os.getenv("FFMPEG_THREADS", "2")
+        return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-tune", "film",
+                "-pix_fmt", "yuv420p", "-threads", threads]
     crf = "20" if profile == "export" else "26"
     preset = "medium" if profile == "export" else "ultrafast"
     threads = os.getenv("FFMPEG_THREADS", "2")

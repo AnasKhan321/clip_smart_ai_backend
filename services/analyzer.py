@@ -90,10 +90,12 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
 def _llm_call(client: OpenAI, transcript: dict, chunk: list, options: dict) -> list:
     """Single chunk → list of candidate dicts. Returns [] on failure."""
     prompt = _build_prompt(transcript, chunk, options)
+    model = os.getenv("ANALYZER_MODEL", "anthropic/claude-sonnet-4-5")
+    max_tokens = int(os.getenv("ANALYZER_MAX_TOKENS", "2000"))
     try:
         response = client.chat.completions.create(
-            model="anthropic/claude-sonnet-4-5",
-            max_tokens=4000,
+            model=model,
+            max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}],
         )
         return _parse_clips(response.choices[0].message.content.strip())
@@ -108,7 +110,7 @@ def _analyze_chunks_parallel(client: OpenAI, transcript: dict, chunks: list,
     """Dispatch all chunks in parallel via thread pool. Aggregates results."""
     if not chunks:
         return []
-    workers = min(len(chunks), int(os.getenv("ANALYZER_CHUNK_WORKERS", "3")))
+    workers = min(len(chunks), int(os.getenv("ANALYZER_CHUNK_WORKERS", "8")))
     candidates: list = []
     completed = 0
     with ThreadPoolExecutor(max_workers=workers) as pool:

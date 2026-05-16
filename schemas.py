@@ -70,4 +70,4 @@ class ExportRequest(BaseModel):
     caption_language: Optional[str] = None
     include_captions: bool = True
     output_format: str = "mp4"
-    focus_mode: str = "none"  # none | speaker | center
+    focus_mode: str = "none"  # none | speaker | center | face

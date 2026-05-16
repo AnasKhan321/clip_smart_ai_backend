@@ -59,7 +59,13 @@ def _build_video_filter(
     """Build a single -filter_complex string ending at [out]."""
     # Stage 1: aspect transform → [composed]
     if aspect_ratio == "9:16":
-        if focus_mode == "speaker" and focus_crop_expr:
+        if focus_mode == "face" and focus_crop_expr:
+            chain = (
+                f"[0:v]crop={focus_crop_expr['cw']}:{focus_crop_expr['ch']}:"
+                f"{focus_crop_expr['x']}:{focus_crop_expr['y']},"
+                f"scale=1080:1920:flags=lanczos[composed]"
+            )
+        elif focus_mode == "speaker" and focus_crop_expr:
             chain = (
                 f"[0:v]crop={focus_crop_expr['cw']}:{focus_crop_expr['ch']}:"
                 f"{focus_crop_expr['x']}:{focus_crop_expr['y']},"
@@ -333,15 +339,31 @@ def render_and_caption_clip(
     src_w = src_h = None
     if source_dims:
         src_w, src_h = source_dims
-    elif focus_mode == "speaker":
+    elif focus_mode in ("speaker", "face"):
         try:
             src_w, src_h = probe_source_dims(source)
         except Exception as exc:
             return {"final_clip_path": None, "error": f"probe failed: {exc}"}
 
-    # Speaker focus: compute crop expression from focus track if available
+    # Speaker / face focus: compute crop expression from track if available
     focus_crop_expr = None
-    if focus_mode == "speaker" and src_w and src_h:
+    if focus_mode == "face" and src_w and src_h:
+        try:
+            from services.speaker_focus import (
+                load_face_track, slice_face_track, build_face_crop_expression,
+            )
+            track = load_face_track(job_id)
+            if track:
+                clip_track = slice_face_track(track, start, end)
+                if clip_track:
+                    focus_crop_expr = build_face_crop_expression(
+                        clip_track, src_w, src_h, 9, 16
+                    )
+        except Exception:
+            focus_crop_expr = None
+        if not focus_crop_expr:
+            focus_mode = "none"
+    elif focus_mode == "speaker" and src_w and src_h:
         try:
             from services.speaker_focus import (
                 load_focus_track, slice_track, build_crop_expression,
