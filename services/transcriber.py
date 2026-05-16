@@ -175,12 +175,9 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
     transcript_path = job_dir / "transcript.json"
     diarization_path = job_dir / "diarization.json"
 
-    # Prefer original.mp4 directly — AssemblyAI accepts video and decodes
-    # server-side. Skipping the local WAV extract saves a full ffmpeg pass
-    # AND ~10× upload size (50MB mp4 vs 600MB WAV for a 1hr video).
+    # Find source media (mp4/mkv/webm/m4a/wav).
     source_path = job_dir / "original.mp4"
     if not source_path.exists():
-        # Fallback: legacy path or alternate extension
         for ext in ("mkv", "webm", "m4a"):
             cand = job_dir / f"original.{ext}"
             if cand.exists():
@@ -194,6 +191,26 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
                 raise FileNotFoundError(
                     f"No source media for transcription in {job_dir}"
                 )
+
+    # Extract a compact m4a (AAC mono 16kHz 32kbps) for the upload. A 1hr
+    # video shrinks from ~1GB → ~15MB, making the Railway→AssemblyAI POST
+    # reliable. Skip if source is already small audio.
+    upload_path = source_path
+    if source_path.suffix.lower() in (".mp4", ".mkv", ".webm"):
+        import subprocess as _sp
+        from services.media_tools import ffmpeg_path as _ffmpeg
+        compact = job_dir / "upload_audio.m4a"
+        try:
+            _sp.run(
+                [_ffmpeg(), "-y", "-i", str(source_path), "-vn",
+                 "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k",
+                 str(compact)],
+                check=True, capture_output=True, timeout=600,
+            )
+            if compact.exists() and compact.stat().st_size > 1024:
+                upload_path = compact
+        except Exception as exc:
+            print(f"[transcriber] compact audio extract failed ({exc}), uploading source", flush=True)
 
     api_key = os.getenv("ASSEMBLYAI_API_KEY")
     if not api_key:
@@ -211,7 +228,7 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
         cfg_kwargs["language_code"] = language
 
     config = aai.TranscriptionConfig(**cfg_kwargs)
-    result = aai.Transcriber().transcribe(str(source_path), config=config)
+    result = aai.Transcriber().transcribe(str(upload_path), config=config)
 
     if result.status == aai.TranscriptStatus.error:
         raise RuntimeError(f"AssemblyAI error: {result.error}")

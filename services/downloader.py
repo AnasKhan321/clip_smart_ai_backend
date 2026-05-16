@@ -81,6 +81,11 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
             video_path = _find_video_file(job_dir)
             if video_path:
                 video_path_abs = str(Path(video_path).resolve())
+                file_size = Path(video_path_abs).stat().st_size
+                if file_size < 100_000:
+                    print(f"[downloader] cobalt returned tiny/empty file ({file_size} bytes), removing and falling back", flush=True)
+                    Path(video_path_abs).unlink(missing_ok=True)
+                    raise RuntimeError("cobalt output too small")
                 if _has_audio_stream(video_path_abs):
                     audio_path = (job_dir / "audio.wav").resolve()
                     if _needs_wav_extraction():
