@@ -119,14 +119,27 @@ def transcribe(job_id: str, language: str = None, progress_callback=None) -> dic
         return load_transcript(job_id)
 
     # If a background pre-submission is in flight, wait on it instead of
-    # firing a duplicate request to the provider.
+    # firing a duplicate request to the provider. Poll with timeout so we
+    # can issue periodic progress callbacks (keeps the DB session alive on
+    # long jobs — Supabase session pooler idles out around 10 min).
+    from concurrent.futures import TimeoutError as _FutTimeout
     with _inflight_lock:
         fut = _inflight.get(job_id)
     if fut is not None:
-        if progress_callback:
-            progress_callback(10)
         try:
-            result = fut.result()
+            pct = 10
+            while True:
+                try:
+                    result = fut.result(timeout=60)
+                    break
+                except _FutTimeout:
+                    if progress_callback:
+                        # Bump 10 → 90 over time so the bar moves; pings DB.
+                        pct = min(pct + 5, 90)
+                        try:
+                            progress_callback(pct)
+                        except Exception:
+                            pass
         finally:
             with _inflight_lock:
                 _inflight.pop(job_id, None)
