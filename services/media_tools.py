@@ -140,10 +140,14 @@ def encoder_video_opts(profile: str = "preview") -> list[str]:
         q = "20" if profile == "export" else "26"
         return ["-c:v", "h264_amf", "-quality", "balanced", "-qp_i", q,
                 "-pix_fmt", "yuv420p"]
-    # libx264 fallback
+    # libx264 fallback. Cap threads-per-process so N parallel workers don't
+    # collectively oversubscribe the CPU. ffmpeg defaults to all cores per
+    # process which thrashes under ThreadPoolExecutor.
     crf = "20" if profile == "export" else "26"
     preset = "medium" if profile == "export" else "ultrafast"
-    return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-pix_fmt", "yuv420p"]
+    threads = os.getenv("FFMPEG_THREADS", "2")
+    return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-pix_fmt", "yuv420p",
+            "-threads", threads]
 
 
 def encoder_audio_opts() -> list[str]:
