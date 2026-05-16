@@ -1,13 +1,61 @@
 import os
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 
 
 _model_cache = {}
 
+# Background pre-submission: if pipeline kicks off transcription early
+# (e.g. as soon as R2 source key is known), it stores the in-flight Future
+# here so the eventual `transcribe()` call in stage 2 just awaits the
+# already-running job instead of submitting a duplicate request.
+_inflight: dict = {}
+_inflight_lock = threading.Lock()
+_inflight_executor: ThreadPoolExecutor = None
+
+
+def _get_inflight_executor() -> ThreadPoolExecutor:
+    global _inflight_executor
+    if _inflight_executor is None:
+        with _inflight_lock:
+            if _inflight_executor is None:
+                _inflight_executor = ThreadPoolExecutor(
+                    max_workers=2, thread_name_prefix="transcribe-async"
+                )
+    return _inflight_executor
+
 
 def _provider() -> str:
     return os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
+
+
+def submit_async(job_id: str, language: str = None) -> Future:
+    """Kick off transcription in background. Idempotent — safe to call
+    multiple times, returns the same Future. Returns None if disk cache
+    already satisfies the request.
+    """
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    if (Path(storage) / "jobs" / job_id / "transcript.json").exists():
+        return None
+    with _inflight_lock:
+        existing = _inflight.get(job_id)
+        if existing is not None:
+            return existing
+        fut = _get_inflight_executor().submit(_run_transcribe, job_id, language)
+        _inflight[job_id] = fut
+        return fut
+
+
+def _run_transcribe(job_id: str, language: str = None) -> dict:
+    p = _provider()
+    if p == "assemblyai":
+        return _transcribe_assemblyai(job_id, language, None)
+    elif p == "openai":
+        return _transcribe_openai(job_id, language, None)
+    else:
+        return _transcribe_local(job_id, language, None)
 
 
 def transcribe(job_id: str, language: str = None, progress_callback=None) -> dict:
@@ -17,6 +65,22 @@ def transcribe(job_id: str, language: str = None, progress_callback=None) -> dic
         if progress_callback:
             progress_callback(100)
         return load_transcript(job_id)
+
+    # If a background pre-submission is in flight, wait on it instead of
+    # firing a duplicate request to the provider.
+    with _inflight_lock:
+        fut = _inflight.get(job_id)
+    if fut is not None:
+        if progress_callback:
+            progress_callback(10)
+        try:
+            result = fut.result()
+        finally:
+            with _inflight_lock:
+                _inflight.pop(job_id, None)
+        if progress_callback:
+            progress_callback(100)
+        return result
 
     p = _provider()
     if p == "assemblyai":
@@ -174,43 +238,61 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
     job_dir = Path(storage) / "jobs" / job_id
     transcript_path = job_dir / "transcript.json"
     diarization_path = job_dir / "diarization.json"
+    job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Find source media (mp4/mkv/webm/m4a/wav).
-    source_path = job_dir / "original.mp4"
-    if not source_path.exists():
-        for ext in ("mkv", "webm", "m4a"):
-            cand = job_dir / f"original.{ext}"
-            if cand.exists():
-                source_path = cand
-                break
-        else:
-            audio_fallback = job_dir / "audio.wav"
-            if audio_fallback.exists():
-                source_path = audio_fallback
+    # Prefer giving AssemblyAI a direct R2 URL — AAI fetches the source
+    # itself, skipping our local pull + ffmpeg compact extract + POST upload.
+    # Falls back to the local upload path when R2 isn't ready (e.g. URL flow
+    # where the background mirror hasn't completed yet).
+    upload_target = None
+    try:
+        from services import r2 as _r2
+        if _r2.is_enabled():
+            r2_key = _r2.source_key(job_id)
+            if _r2.object_exists(r2_key):
+                upload_target = _r2.object_url(r2_key, ttl=3600)
+    except Exception as exc:
+        print(f"[transcriber] r2 url lookup failed ({exc}), using local upload", flush=True)
+        upload_target = None
+
+    if upload_target is None:
+        # Local-upload fallback: find source media (mp4/mkv/webm/m4a/wav).
+        source_path = job_dir / "original.mp4"
+        if not source_path.exists():
+            for ext in ("mkv", "webm", "m4a"):
+                cand = job_dir / f"original.{ext}"
+                if cand.exists():
+                    source_path = cand
+                    break
             else:
-                raise FileNotFoundError(
-                    f"No source media for transcription in {job_dir}"
-                )
+                audio_fallback = job_dir / "audio.wav"
+                if audio_fallback.exists():
+                    source_path = audio_fallback
+                else:
+                    raise FileNotFoundError(
+                        f"No source media for transcription in {job_dir}"
+                    )
 
-    # Extract a compact m4a (AAC mono 16kHz 32kbps) for the upload. A 1hr
-    # video shrinks from ~1GB → ~15MB, making the Railway→AssemblyAI POST
-    # reliable. Skip if source is already small audio.
-    upload_path = source_path
-    if source_path.suffix.lower() in (".mp4", ".mkv", ".webm"):
-        import subprocess as _sp
-        from services.media_tools import ffmpeg_path as _ffmpeg
-        compact = job_dir / "upload_audio.m4a"
-        try:
-            _sp.run(
-                [_ffmpeg(), "-y", "-i", str(source_path), "-vn",
-                 "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k",
-                 str(compact)],
-                check=True, capture_output=True, timeout=600,
-            )
-            if compact.exists() and compact.stat().st_size > 1024:
-                upload_path = compact
-        except Exception as exc:
-            print(f"[transcriber] compact audio extract failed ({exc}), uploading source", flush=True)
+        # Extract a compact m4a (AAC mono 16kHz 32kbps) for the upload. A 1hr
+        # video shrinks from ~1GB → ~15MB, making the Railway→AssemblyAI POST
+        # reliable. Skip if source is already small audio.
+        upload_path = source_path
+        if source_path.suffix.lower() in (".mp4", ".mkv", ".webm"):
+            import subprocess as _sp
+            from services.media_tools import ffmpeg_path as _ffmpeg
+            compact = job_dir / "upload_audio.m4a"
+            try:
+                _sp.run(
+                    [_ffmpeg(), "-y", "-i", str(source_path), "-vn",
+                     "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k",
+                     str(compact)],
+                    check=True, capture_output=True, timeout=600,
+                )
+                if compact.exists() and compact.stat().st_size > 1024:
+                    upload_path = compact
+            except Exception as exc:
+                print(f"[transcriber] compact audio extract failed ({exc}), uploading source", flush=True)
+        upload_target = str(upload_path)
 
     api_key = os.getenv("ASSEMBLYAI_API_KEY")
     if not api_key:
@@ -228,7 +310,7 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
         cfg_kwargs["language_code"] = language
 
     config = aai.TranscriptionConfig(**cfg_kwargs)
-    result = aai.Transcriber().transcribe(str(upload_path), config=config)
+    result = aai.Transcriber().transcribe(upload_target, config=config)
 
     if result.status == aai.TranscriptStatus.error:
         raise RuntimeError(f"AssemblyAI error: {result.error}")
