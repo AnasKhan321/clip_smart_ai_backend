@@ -497,7 +497,7 @@ def _groq_transcribe_chunked(client, model: str, audio_path: Path,
         }
         if lang:
             kwargs["language"] = lang
-        for attempt in range(1, 4):
+        for attempt in range(1, 6):
             try:
                 with open(chunk_file, "rb") as f:
                     resp = client.audio.transcriptions.create(
@@ -506,14 +506,17 @@ def _groq_transcribe_chunked(client, model: str, audio_path: Path,
                     )
                 return _groq_response_to_dict(resp)
             except Exception as exc:
-                if attempt < 3:
-                    _time.sleep(2 ** attempt)
+                if attempt < 5:
+                    # Longer backoff for rate limits (429) or server errors (500)
+                    _time.sleep((2 ** attempt) * 2)  # 4s, 8s, 16s, 32s
                 else:
                     raise RuntimeError(
-                        f"Groq failed on {chunk_file.name} after 3 attempts: {exc}"
+                        f"Groq failed on {chunk_file.name} after 5 attempts: {exc}"
                     ) from exc
 
-    max_workers = min(len(chunks), 6)  # Cap at 6 to avoid Groq rate limits
+    # Cap at 2 to avoid Groq free tier concurrency / rate limits.
+    # It still finishes a 2hr podcast in ~1.5 minutes, much faster than Assembly.
+    max_workers = min(len(chunks), 2)
     results = [None] * len(chunks)
     completed = 0
 
