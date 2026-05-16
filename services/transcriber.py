@@ -12,7 +12,9 @@ _model_cache = {}
 # here so the eventual `transcribe()` call in stage 2 just awaits the
 # already-running job instead of submitting a duplicate request.
 _inflight: dict = {}
-_inflight_lock = threading.Lock()
+# RLock (reentrant) — submit_async holds this while calling
+# _get_inflight_executor(), which also acquires it. A plain Lock would deadlock.
+_inflight_lock = threading.RLock()
 _inflight_executor: ThreadPoolExecutor = None
 
 
