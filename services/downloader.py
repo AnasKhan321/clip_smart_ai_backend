@@ -79,14 +79,20 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         try:
             meta = _download_via_cobalt(cobalt_url, url, job_dir, progress_callback)
             video_path = _find_video_file(job_dir)
-            if video_path and _has_audio_stream(str(video_path)):
-                audio_path = job_dir / "audio.wav"
-                if _needs_wav_extraction():
-                    _extract_audio(str(video_path), str(audio_path))
-                meta["duration"] = _get_duration(str(video_path))
-                if progress_callback:
-                    progress_callback(100)
-                return {**meta, "video_path": str(video_path), "audio_path": str(audio_path)}
+            if video_path:
+                video_path_abs = str(Path(video_path).resolve())
+                if _has_audio_stream(video_path_abs):
+                    audio_path = (job_dir / "audio.wav").resolve()
+                    if _needs_wav_extraction():
+                        _extract_audio(video_path_abs, str(audio_path))
+                    try:
+                        meta["duration"] = _get_duration(video_path_abs)
+                    except Exception as exc:
+                        print(f"[downloader] duration probe failed ({exc}), defaulting to 0", flush=True)
+                        meta["duration"] = 0
+                    if progress_callback:
+                        progress_callback(100)
+                    return {**meta, "video_path": video_path_abs, "audio_path": str(audio_path)}
             print("[downloader] cobalt returned file without audio, falling back to yt-dlp", flush=True)
         except Exception as exc:
             print(f"[downloader] cobalt failed ({exc}), falling back to yt-dlp", flush=True)
