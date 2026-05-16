@@ -73,7 +73,29 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     job_dir = get_job_dir(job_id)
     output_template = str(job_dir / "original.%(ext)s")
 
-    # Try cobalt first if configured. Bypasses yt-dlp's YouTube cookie hell.
+    # Try RapidAPI first if configured. Most reliable — direct YouTube CDN URLs.
+    rapidapi_key = os.getenv("RAPIDAPI_YT_KEY")
+    if rapidapi_key and ("youtube.com" in url or "youtu.be" in url):
+        try:
+            meta = _download_via_rapidapi(rapidapi_key, url, job_dir, progress_callback)
+            video_path = _find_video_file(job_dir)
+            if video_path:
+                video_path_abs = str(Path(video_path).resolve())
+                if Path(video_path_abs).stat().st_size > 100_000 and _has_audio_stream(video_path_abs):
+                    audio_path = (job_dir / "audio.wav").resolve()
+                    if _needs_wav_extraction():
+                        _extract_audio(video_path_abs, str(audio_path))
+                    try:
+                        meta["duration"] = _get_duration(video_path_abs)
+                    except Exception:
+                        meta["duration"] = 0
+                    if progress_callback:
+                        progress_callback(100)
+                    return {**meta, "video_path": video_path_abs, "audio_path": str(audio_path)}
+        except Exception as exc:
+            print(f"[downloader] rapidapi failed ({exc}), trying next", flush=True)
+
+    # Try cobalt next if configured. Bypasses yt-dlp's YouTube cookie hell.
     cobalt_url = os.getenv("COBALT_API_URL")
     if cobalt_url:
         try:
@@ -202,6 +224,112 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         "video_path": str(video_path),
         "audio_path": str(audio_path),
     }
+
+
+_YOUTUBE_ID_RE = None
+
+
+def _extract_youtube_id(url: str) -> Optional[str]:
+    import re
+    global _YOUTUBE_ID_RE
+    if _YOUTUBE_ID_RE is None:
+        _YOUTUBE_ID_RE = re.compile(
+            r"(?:youtube\.com/(?:watch\?v=|embed/|shorts/|v/)|youtu\.be/)([\w-]{11})"
+        )
+    m = _YOUTUBE_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+def _download_via_rapidapi(api_key: str, source_url: str, job_dir: Path,
+                            progress_callback=None) -> dict:
+    """RapidAPI ytstream → direct YouTube CDN URLs → ffmpeg mux locally.
+
+    Downloads best mp4 video (≤720p) + best mp4 audio, muxes to original.mp4.
+    """
+    import urllib.request
+
+    video_id = _extract_youtube_id(source_url)
+    if not video_id:
+        raise RuntimeError(f"could not extract YouTube ID from {source_url}")
+
+    req = urllib.request.Request(
+        f"https://ytstream-download-youtube-videos.p.rapidapi.com/dl?id={video_id}",
+        headers={
+            "x-rapidapi-key": api_key,
+            "x-rapidapi-host": "ytstream-download-youtube-videos.p.rapidapi.com",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+
+    if data.get("status") != "OK":
+        raise RuntimeError(f"rapidapi status={data.get('status')}: {data.get('error', 'unknown')}")
+
+    title = data.get("title", "video")
+    duration = int(data.get("lengthSeconds", 0) or 0)
+
+    # Pick mp4 video ≤ 720p (avc1 codec for compatibility).
+    video_fmts = [
+        f for f in data.get("adaptiveFormats", [])
+        if "video/mp4" in f.get("mimeType", "") and "avc1" in f.get("mimeType", "")
+    ]
+    # Sort by height ascending, take largest ≤720
+    def _height(f):
+        try:
+            return int(f.get("qualityLabel", "0").rstrip("p"))
+        except ValueError:
+            return 0
+    video_fmts.sort(key=_height)
+    video_fmt = next((f for f in reversed(video_fmts) if _height(f) <= 720), video_fmts[-1] if video_fmts else None)
+    if not video_fmt:
+        raise RuntimeError("no suitable mp4 video format in rapidapi response")
+
+    audio_fmts = [
+        f for f in data.get("adaptiveFormats", [])
+        if "audio/mp4" in f.get("mimeType", "")
+    ]
+    audio_fmts.sort(key=lambda f: int(f.get("bitrate", 0) or 0))
+    audio_fmt = audio_fmts[-1] if audio_fmts else None
+    if not audio_fmt:
+        raise RuntimeError("no mp4 audio format in rapidapi response")
+
+    vid_path = job_dir / "_dl_video.mp4"
+    aud_path = job_dir / "_dl_audio.m4a"
+
+    def _fetch(src_url: str, dst: Path):
+        with urllib.request.urlopen(src_url, timeout=600) as r:
+            with open(dst, "wb") as f:
+                while True:
+                    chunk = r.read(1024 * 256)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+
+    if progress_callback:
+        progress_callback(10)
+    _fetch(video_fmt["url"], vid_path)
+    if progress_callback:
+        progress_callback(50)
+    _fetch(audio_fmt["url"], aud_path)
+    if progress_callback:
+        progress_callback(70)
+
+    # Mux video + audio → original.mp4
+    out_path = job_dir / "original.mp4"
+    subprocess.run(
+        [ffmpeg_path(), "-y", "-i", str(vid_path), "-i", str(aud_path),
+         "-c", "copy", "-movflags", "+faststart", str(out_path)],
+        check=True, capture_output=True, timeout=600,
+    )
+
+    # Cleanup intermediate files.
+    for p in (vid_path, aud_path):
+        try:
+            p.unlink()
+        except OSError:
+            pass
+
+    return {"title": title, "duration": duration}
 
 
 def _download_via_cobalt(api_url: str, source_url: str, job_dir: Path,
