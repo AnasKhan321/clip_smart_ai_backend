@@ -33,4 +33,11 @@ celery.conf.update(
     enable_utc=True,
     task_track_started=True,
     worker_prefetch_multiplier=1,
+    # Survive worker death (redeploys, OOM, crashes). Task is only ACKed after
+    # successful completion. If worker dies mid-task, broker re-delivers it.
+    task_acks_late=True,
+    task_reject_on_worker_lost=True,
+    # Give long pipelines enough graceful-shutdown time. SIGTERM → worker
+    # finishes current task within this window before SIGKILL.
+    worker_shutdown_timeout=120,
 )

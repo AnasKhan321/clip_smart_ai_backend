@@ -299,7 +299,13 @@ def _download_via_rapidapi(api_key: str, source_url: str, job_dir: Path,
     aud_path = job_dir / "_dl_audio.m4a"
 
     def _fetch(src_url: str, dst: Path):
-        with urllib.request.urlopen(src_url, timeout=600) as r:
+        # YouTube CDN rejects requests with default Python-urllib UA. Use
+        # browser-like UA matching the one player_client=android would send.
+        fetch_req = urllib.request.Request(
+            src_url,
+            headers={"User-Agent": "com.google.android.youtube/19.09.37 (Linux; U; Android 14)"},
+        )
+        with urllib.request.urlopen(fetch_req, timeout=600) as r:
             with open(dst, "wb") as f:
                 while True:
                     chunk = r.read(1024 * 256)
