@@ -484,44 +484,59 @@ def _groq_transcribe_chunked(client, model: str, audio_path: Path,
         offset += _GROQ_CHUNK_DURATION
         chunk_idx += 1
 
-    # Transcribe each chunk
-    all_segments = []
-    detected_lang = "unknown"
+    # Transcribe all chunks in parallel — brings ~175s down to ~20-30s
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+    import time as _time
 
-    for i, (chunk_file, time_offset) in enumerate(chunks):
+    def _transcribe_one_chunk(chunk_file, lang):
+        """Transcribe a single chunk with retry logic."""
         kwargs = {
             "model": model,
             "response_format": "verbose_json",
             "timestamp_granularities": ["segment", "word"],
         }
-        if language:
-            kwargs["language"] = language
-
-        # Retry with backoff — Groq occasionally returns 500s
-        response = None
+        if lang:
+            kwargs["language"] = lang
         for attempt in range(1, 4):
             try:
                 with open(chunk_file, "rb") as f:
-                    response = client.audio.transcriptions.create(
+                    resp = client.audio.transcriptions.create(
                         file=(chunk_file.name, f.read()),
                         **kwargs,
                     )
-                break
+                return _groq_response_to_dict(resp)
             except Exception as exc:
                 if attempt < 3:
-                    import time as _time
                     _time.sleep(2 ** attempt)
                 else:
                     raise RuntimeError(
-                        f"Groq transcription failed on chunk {i+1}/{len(chunks)} "
-                        f"after 3 attempts: {exc}"
+                        f"Groq failed on {chunk_file.name} after 3 attempts: {exc}"
                     ) from exc
 
-        chunk_result = _groq_response_to_dict(response)
+    max_workers = min(len(chunks), 6)  # Cap at 6 to avoid Groq rate limits
+    results = [None] * len(chunks)
+    completed = 0
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_to_idx = {
+            pool.submit(_transcribe_one_chunk, cf, language): i
+            for i, (cf, _off) in enumerate(chunks)
+        }
+        for fut in _as_completed(future_to_idx):
+            idx = future_to_idx[fut]
+            results[idx] = fut.result()
+            completed += 1
+            if progress_callback:
+                pct = 10 + int(completed / len(chunks) * 85)
+                progress_callback(pct)
+
+    # Merge results in order with proper time offsets
+    all_segments = []
+    detected_lang = "unknown"
+
+    for i, ((_cf, time_offset), chunk_result) in enumerate(zip(chunks, results)):
         if i == 0:
             detected_lang = chunk_result.get("language", "unknown")
-
-        # Offset all timestamps
         for seg in chunk_result.get("segments", []):
             seg["start"] += time_offset
             seg["end"] += time_offset
@@ -530,10 +545,6 @@ def _groq_transcribe_chunked(client, model: str, audio_path: Path,
                 w["end"] += time_offset
             all_segments.append(seg)
 
-        if progress_callback:
-            pct = 10 + int((i + 1) / len(chunks) * 85)
-            progress_callback(pct)
-
     # Cleanup chunk files
     import shutil
     shutil.rmtree(chunk_dir, ignore_errors=True)
@@ -541,23 +552,37 @@ def _groq_transcribe_chunked(client, model: str, audio_path: Path,
     return {"language": detected_lang, "segments": all_segments}
 
 
+def _get_val(obj, key, default=None):
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 def _groq_response_to_dict(response) -> dict:
     """Convert Groq transcription response to our standard format."""
-    all_words = response.words or []
+    all_words = _get_val(response, "words") or []
+    raw_segments = _get_val(response, "segments") or []
     segments = []
 
-    for seg in (response.segments or []):
+    for seg in raw_segments:
+        s_start = _get_val(seg, "start", 0.0)
+        s_end = _get_val(seg, "end", 0.0)
+        s_text = _get_val(seg, "text", "")
         # Match words to segment by time range
         seg_words = [
             w for w in all_words
-            if w.start >= seg.start and w.end <= seg.end + 0.1
+            if _get_val(w, "start", 0.0) >= s_start and _get_val(w, "end", 0.0) <= s_end + 0.1
         ]
         segments.append({
-            "start": seg.start,
-            "end": seg.end,
-            "text": seg.text.strip(),
+            "start": s_start,
+            "end": s_end,
+            "text": s_text.strip(),
             "words": [
-                {"word": w.word, "start": w.start, "end": w.end, "probability": 1.0}
+                {
+                    "word": _get_val(w, "word", ""),
+                    "start": _get_val(w, "start", 0.0),
+                    "end": _get_val(w, "end", 0.0),
+                    "probability": 1.0
+                }
                 for w in seg_words
             ],
         })
@@ -566,17 +591,24 @@ def _groq_response_to_dict(response) -> dict:
     if not segments and all_words:
         current = None
         for w in all_words:
-            if current is None or w.start - current["start"] > 10:
-                current = {"start": w.start, "end": w.end, "text": "", "words": []}
+            w_start = _get_val(w, "start", 0.0)
+            w_end = _get_val(w, "end", 0.0)
+            w_word = _get_val(w, "word", "")
+            if current is None or w_start - current["start"] > 10:
+                current = {"start": w_start, "end": w_end, "text": "", "words": []}
                 segments.append(current)
-            current["end"] = w.end
-            current["text"] = (current["text"] + " " + w.word).strip()
+            current["end"] = w_end
+            current["text"] = (current["text"] + " " + w_word).strip()
             current["words"].append(
-                {"word": w.word, "start": w.start, "end": w.end, "probability": 1.0}
+                {"word": w_word, "start": w_start, "end": w_end, "probability": 1.0}
             )
 
+    lang = _get_val(response, "language", "unknown")
+    if not lang:
+        lang = "unknown"
+
     return {
-        "language": getattr(response, "language", None) or "unknown",
+        "language": lang,
         "segments": segments,
     }
 
