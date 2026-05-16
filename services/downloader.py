@@ -85,7 +85,10 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
 
     ydl_opts = {
         "outtmpl": output_template,
-        "format": "bestvideo+bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        # Require audio stream — fallbacks default to "best" which can grab
+        # a video-only mp4 on some sources, then AssemblyAI rejects it with
+        # "File does not appear to contain audio".
+        "format": "bestvideo+bestaudio/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[acodec!=none][ext=mp4]/best[acodec!=none]",
         "merge_output_format": "mp4",
         "writeinfojson": True,
         "progress_hooks": [ydl_progress_hook],
@@ -145,6 +148,12 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     if not video_path:
         raise FileNotFoundError("Download completed but video file not found")
 
+    if not _has_audio_stream(str(video_path)):
+        raise RuntimeError(
+            "Downloaded media has no audio stream. Source may be silent or "
+            "only a video-only format is available. Try a different URL."
+        )
+
     audio_path = job_dir / "audio.wav"
     # AssemblyAI accepts mp4 directly — skip the local WAV extraction (saves
     # ~30s of ffmpeg work + ~10× upload size). Other providers (local whisper,
@@ -160,6 +169,21 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         "video_path": str(video_path),
         "audio_path": str(audio_path),
     }
+
+
+def _has_audio_stream(video_path: str) -> bool:
+    """ffprobe-based check: does the file contain at least one audio stream?"""
+    try:
+        result = subprocess.run(
+            [ffprobe_path(), "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", video_path],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        return "audio" in result.stdout
+    except Exception:
+        # Fail open — let downstream raise the real error rather than blocking
+        # on a probe glitch.
+        return True
 
 
 def _needs_wav_extraction() -> bool:
