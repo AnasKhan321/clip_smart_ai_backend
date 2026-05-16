@@ -1,5 +1,6 @@
 import os
 import json
+import atexit
 import threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
@@ -26,6 +27,8 @@ def _get_inflight_executor() -> ThreadPoolExecutor:
                 _inflight_executor = ThreadPoolExecutor(
                     max_workers=2, thread_name_prefix="transcribe-async"
                 )
+                # Ensure clean shutdown on worker exit (Railway redeploy etc.)
+                atexit.register(_inflight_executor.shutdown, wait=False)
     return _inflight_executor
 
 
@@ -319,7 +322,9 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
         if _r2.is_enabled():
             r2_key = _r2.source_key(job_id)
             if _r2.object_exists(r2_key):
-                upload_target = _r2.object_url(r2_key, ttl=3600)
+                # 2hr TTL so long AssemblyAI queue + 2hr podcast fetch can
+                # complete before the URL expires.
+                upload_target = _r2.object_url(r2_key, ttl=7200)
     except Exception as exc:
         print(f"[transcriber] r2 url lookup failed ({exc}), using local upload", flush=True)
         upload_target = None
@@ -486,10 +491,13 @@ def _check_transcript_quality(result: dict):
 
 _transcript_cache: dict = {}
 _TRANSCRIPT_CACHE_MAX = 4
+# Guards _transcript_cache. Threaded Celery pool can hit this concurrently.
+_transcript_cache_lock = threading.Lock()
 
 
 def load_transcript(job_id: str) -> dict:
-    cached = _transcript_cache.get(job_id)
+    with _transcript_cache_lock:
+        cached = _transcript_cache.get(job_id)
     if cached is not None:
         return cached
     storage = os.getenv("STORAGE_PATH", "./storage")
@@ -498,15 +506,17 @@ def load_transcript(job_id: str) -> dict:
         _ensure_local_artifact(job_id, "transcript.json")
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    if len(_transcript_cache) >= _TRANSCRIPT_CACHE_MAX:
-        # Drop oldest insertion (CPython dicts preserve order)
-        _transcript_cache.pop(next(iter(_transcript_cache)))
-    _transcript_cache[job_id] = data
+    with _transcript_cache_lock:
+        if len(_transcript_cache) >= _TRANSCRIPT_CACHE_MAX:
+            # Drop oldest insertion (CPython dicts preserve order)
+            _transcript_cache.pop(next(iter(_transcript_cache)))
+        _transcript_cache[job_id] = data
     return data
 
 
 def invalidate_transcript_cache(job_id: str = None):
-    if job_id is None:
-        _transcript_cache.clear()
-    else:
-        _transcript_cache.pop(job_id, None)
+    with _transcript_cache_lock:
+        if job_id is None:
+            _transcript_cache.clear()
+        else:
+            _transcript_cache.pop(job_id, None)

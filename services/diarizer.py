@@ -1,5 +1,6 @@
 import os
 import json
+import threading
 from pathlib import Path
 
 
@@ -74,10 +75,12 @@ def _diarize_local(job_id: str, progress_callback=None) -> list:
 
 
 _diarization_cache: dict = {}
+_diarization_cache_lock = threading.Lock()
 
 
 def load_diarization(job_id: str) -> list:
-    cached = _diarization_cache.get(job_id)
+    with _diarization_cache_lock:
+        cached = _diarization_cache.get(job_id)
     if cached is not None:
         return cached
     storage = os.getenv("STORAGE_PATH", "./storage")
@@ -93,9 +96,10 @@ def load_diarization(job_id: str) -> list:
         return []
     with open(path, "r") as f:
         data = json.load(f)
-    if len(_diarization_cache) >= 4:
-        _diarization_cache.pop(next(iter(_diarization_cache)))
-    _diarization_cache[job_id] = data
+    with _diarization_cache_lock:
+        if len(_diarization_cache) >= 4:
+            _diarization_cache.pop(next(iter(_diarization_cache)))
+        _diarization_cache[job_id] = data
     return data
 
 

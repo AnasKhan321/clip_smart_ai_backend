@@ -1,5 +1,11 @@
 """Cloudflare R2 storage helpers.
 
+Retry & self-heal strategy
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+``upload_in_background`` retries up to 3× with exponential back-off.
+On final failure it calls an optional ``on_failure(key)`` callback so the
+caller can clear the stale ``r2_clip_key`` from the DB row.
+
 R2 = S3-compatible object store. Used as durable layer:
   - browser uploads original video direct-to-R2 (multipart presign, bypasses backend)
   - worker pulls from R2 to local scratch for ffmpeg/whisper
@@ -18,7 +24,9 @@ Env:
 from __future__ import annotations
 
 import os
+import time
 import threading
+import logging
 from pathlib import Path
 from typing import Optional
 
@@ -213,13 +221,54 @@ def delete_prefix(prefix: str) -> int:
 
 # ── Background async push (fire-and-forget from worker) ─────────────────────
 
-def upload_in_background(local_path: str, key: str,
-                         content_type: str = "video/mp4") -> threading.Thread:
+_bg_logger = logging.getLogger(__name__)
+
+_UPLOAD_MAX_RETRIES = 3
+_UPLOAD_BACKOFF_BASE = 2  # seconds; retry 1 → 2s, 2 → 4s, 3 → 8s
+
+
+def upload_in_background(
+    local_path: str,
+    key: str,
+    content_type: str = "video/mp4",
+    on_failure: "Callable[[str], None] | None" = None,
+) -> threading.Thread:
+    """Upload file to R2 in a daemon thread with retry + optional cleanup.
+
+    Args:
+        on_failure: called with *key* after all retries are exhausted.
+                    Use it to clear the stale ``r2_clip_key`` from the DB.
+    """
     def _run():
-        try:
-            upload_file(local_path, key, content_type)
-        except Exception as exc:
-            print(f"[r2] background upload failed {key}: {exc}", flush=True)
+        last_exc: Exception | None = None
+        for attempt in range(1, _UPLOAD_MAX_RETRIES + 1):
+            try:
+                upload_file(local_path, key, content_type)
+                _bg_logger.info("[r2] background upload OK %s (attempt %d)",
+                                key, attempt)
+                return  # success
+            except Exception as exc:
+                last_exc = exc
+                _bg_logger.warning(
+                    "[r2] background upload attempt %d/%d failed for %s: %s",
+                    attempt, _UPLOAD_MAX_RETRIES, key, exc,
+                )
+                if attempt < _UPLOAD_MAX_RETRIES:
+                    time.sleep(_UPLOAD_BACKOFF_BASE ** attempt)
+
+        # All retries exhausted
+        _bg_logger.error(
+            "[r2] background upload FAILED permanently for %s: %s",
+            key, last_exc,
+        )
+        if on_failure:
+            try:
+                on_failure(key)
+            except Exception as cb_exc:
+                _bg_logger.error(
+                    "[r2] on_failure callback error for %s: %s", key, cb_exc,
+                )
+
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     return t

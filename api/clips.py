@@ -1,5 +1,9 @@
+import hashlib
+import hmac
 import os
-from fastapi import APIRouter, Depends, HTTPException, Request
+import logging
+import time
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse, RedirectResponse
 from sqlalchemy.orm import Session
 from database import get_db
@@ -9,9 +13,40 @@ from services.exporter import export_clip
 from services.transcriber import load_transcript
 from services.editor import render_and_caption_clip
 from services import r2
-from auth import get_current_user
+from auth import get_current_user, SECRET_KEY
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
+# ── Stream-token helpers ────────────────────────────────────────────────────
+# <video> / ReactPlayer can't send Authorization headers, so the stream
+# endpoint accepts a short-lived HMAC token via query-param instead.
+
+_STREAM_TOKEN_TTL = 4 * 3600  # 4 hours
+
+
+def _sign_stream_token(clip_id: str) -> str:
+    """Create an HMAC token: hex(expires) + '.' + hex(hmac)."""
+    expires = int(time.time()) + _STREAM_TOKEN_TTL
+    msg = f"{clip_id}:{expires}".encode()
+    sig = hmac.new(SECRET_KEY.encode(), msg, hashlib.sha256).hexdigest()
+    return f"{expires:x}.{sig}"
+
+
+def _verify_stream_token(clip_id: str, token: str) -> bool:
+    """Return True if the token is valid and not expired."""
+    try:
+        parts = token.split(".", 1)
+        if len(parts) != 2:
+            return False
+        expires = int(parts[0], 16)
+        if time.time() > expires:
+            return False
+        msg = f"{clip_id}:{expires}".encode()
+        expected = hmac.new(SECRET_KEY.encode(), msg, hashlib.sha256).hexdigest()
+        return hmac.compare_digest(expected, parts[1])
+    except Exception:
+        return False
 
 
 def serialize_clip(clip: Clip) -> ClipOut:
@@ -120,7 +155,19 @@ def _rerender_clip(clip: Clip, db: Session):
         if r2.is_enabled() and result["final_clip_path"]:
             key = r2.clip_key(clip.job_id, clip.rank)
             clip.r2_clip_key = key
-            r2.upload_in_background(result["final_clip_path"], key)
+            _clip_id = clip.id
+            def _clear_key(k, cid=_clip_id):
+                from database import SessionLocal
+                s = SessionLocal()
+                try:
+                    c = s.query(Clip).filter(Clip.id == cid).first()
+                    if c and c.r2_clip_key == k:
+                        c.r2_clip_key = None
+                        s.commit()
+                finally:
+                    s.close()
+            r2.upload_in_background(result["final_clip_path"], key,
+                                    on_failure=_clear_key)
 
     db.commit()
 
@@ -160,8 +207,33 @@ def export_clip_endpoint(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/clips/{clip_id}/stream-url")
+def get_stream_url(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Return a short-lived authenticated stream URL for <video> tags.
+
+    ReactPlayer / <video> can't send Authorization headers, so we mint a
+    time-limited HMAC token and embed it in the URL as a query-param.
+    """
+    clip = _owned_clip(clip_id, db, user)
+    token = _sign_stream_token(clip.id)
+    return {"stream_url": f"/api/clips/{clip.id}/stream?token={token}"}
+
+
 @router.get("/clips/{clip_id}/stream")
-def stream_clip(clip_id: str, request: Request, db: Session = Depends(get_db)):
+def stream_clip(
+    clip_id: str,
+    request: Request,
+    token: str = Query(..., description="HMAC stream token from /stream-url"),
+    db: Session = Depends(get_db),
+):
+    """Stream clip video. Requires a valid HMAC token (from /stream-url)."""
+    if not _verify_stream_token(clip_id, token):
+        raise HTTPException(status_code=401, detail="Invalid or expired stream token")
+
     clip = db.query(Clip).filter(Clip.id == clip_id).first()
     if not clip:
         raise HTTPException(status_code=404, detail="Clip not found")
@@ -234,15 +306,36 @@ def download_clip(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Resolve a clip download URL.
+
+    Prefers R2: returns JSON `{url: <presigned R2 URL>}` so the browser can
+    fetch directly from the CDN edge without proxying through Railway.
+    Returning a redirect here was unsafe: the frontend hits this endpoint
+    via axios, which auto-follows the 307 and re-sends the `Authorization`
+    header to R2 — R2 rejects that (signed-URL header conflict / CORS),
+    silently breaking downloads.
+
+    Falls back to streaming the local ephemeral file if R2 isn't usable.
+    """
     clip = _owned_clip(clip_id, db, user)
 
-    # Prefer R2: redirect to CDN. Frontend downloads direct from edge.
     if clip.r2_clip_key and r2.is_enabled():
         try:
-            return RedirectResponse(url=r2.object_url(clip.r2_clip_key),
-                                    status_code=307)
-        except Exception:
-            pass
+            if r2.object_exists(clip.r2_clip_key):
+                return {"url": r2.object_url(clip.r2_clip_key, ttl=7200)}
+            else:
+                # Self-heal: background upload must have failed permanently.
+                # Clear the stale key so future requests skip the R2 check
+                # and fall through to the local-file path immediately.
+                logger.warning(
+                    "r2 object missing for clip %s (key=%s) — clearing stale key",
+                    clip_id, clip.r2_clip_key,
+                )
+                clip.r2_clip_key = None
+                db.commit()
+        except Exception as exc:
+            logger.warning("r2 download URL build failed for clip %s: %s",
+                           clip_id, exc)
 
     from services.editor import get_clips_dir
     export_file = str(get_clips_dir(clip.job_id) / f"clip_{clip.rank:03d}_export.mp4")
@@ -252,7 +345,11 @@ def download_clip(
         path = clip.final_clip_path
 
     if not path or not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="Clip file not found")
+        raise HTTPException(
+            status_code=404,
+            detail="Clip file not available. R2 upload may still be in progress — "
+                   "try again in a moment.",
+        )
 
     return FileResponse(
         path,

@@ -163,7 +163,18 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
                 if r2.is_enabled() and res["final_clip_path"]:
                     key = r2.clip_key(job_id, clip_row.rank)
                     clip_row.r2_clip_key = key
-                    r2.upload_in_background(res["final_clip_path"], key)
+                    _clip_id = clip_row.id
+                    def _clear_key(k, cid=_clip_id):
+                        _db = SessionLocal()
+                        try:
+                            c = _db.query(Clip).filter(Clip.id == cid).first()
+                            if c and c.r2_clip_key == k:
+                                c.r2_clip_key = None
+                                _db.commit()
+                        finally:
+                            _db.close()
+                    r2.upload_in_background(res["final_clip_path"], key,
+                                            on_failure=_clear_key)
             db.commit()
             done += 1
             pct = progress_offset + int(done / total * (100 - progress_offset))
@@ -345,11 +356,27 @@ def run_full_pipeline(self, job_id: str, options: dict):
 
     except Exception as exc:
         logger.exception("pipeline failed for job %s", job_id)
-        _set_job_status(db, job_id, "failed", 0, error=str(exc))
-        _refund_failed_job(db, job_id)
+        # Roll back any dirty state from the failed transaction before we try
+        # to write the failure record + refund on a fresh transaction.
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("rollback after pipeline failure failed for %s", job_id)
+        try:
+            _set_job_status(db, job_id, "failed", 0, error=str(exc)[:500])
+            _refund_failed_job(db, job_id)
+        except Exception:
+            logger.exception("status/refund write after failure failed for %s", job_id)
+            try:
+                db.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass
 
 
 @celery.task(bind=True, name="tasks.pipeline.run_more_clips")
@@ -395,8 +422,22 @@ def run_more_clips(self, job_id: str, options: dict, excluded_clips: list):
 
     except Exception as exc:
         logger.exception("more-clips failed for job %s", job_id)
-        _set_job_status(db, job_id, "failed", 0, error=str(exc))
-        _refund_failed_job(db, job_id)
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("rollback after more-clips failure failed for %s", job_id)
+        try:
+            _set_job_status(db, job_id, "failed", 0, error=str(exc)[:500])
+            _refund_failed_job(db, job_id)
+        except Exception:
+            logger.exception("status/refund write after more-clips failure failed for %s", job_id)
+            try:
+                db.rollback()
+            except Exception:
+                pass
         raise
     finally:
-        db.close()
+        try:
+            db.close()
+        except Exception:
+            pass

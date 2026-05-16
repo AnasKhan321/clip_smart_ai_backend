@@ -406,7 +406,19 @@ def _render_manual_clip_bg(clip_id: str):
             if r2.is_enabled() and result["final_clip_path"]:
                 key = r2.clip_key(clip.job_id, clip.rank)
                 clip.r2_clip_key = key
-                r2.upload_in_background(result["final_clip_path"], key)
+                _clip_id = clip.id
+                def _clear_key(k, cid=_clip_id):
+                    from database import SessionLocal as _SL
+                    s = _SL()
+                    try:
+                        c = s.query(Clip).filter(Clip.id == cid).first()
+                        if c and c.r2_clip_key == k:
+                            c.r2_clip_key = None
+                            s.commit()
+                    finally:
+                        s.close()
+                r2.upload_in_background(result["final_clip_path"], key,
+                                        on_failure=_clear_key)
         db.commit()
     finally:
         db.close()
