@@ -105,6 +105,8 @@ def _run_transcribe(job_id: str, language: str = None) -> dict:
         return _transcribe_assemblyai(job_id, language, None)
     elif p == "openai":
         return _transcribe_openai(job_id, language, None)
+    elif p == "groq":
+        return _transcribe_groq(job_id, language, None)
     else:
         return _transcribe_local(job_id, language, None)
 
@@ -155,6 +157,8 @@ def transcribe(job_id: str, language: str = None, progress_callback=None) -> dic
         return _transcribe_assemblyai(job_id, language, progress_callback)
     elif p == "openai":
         return _transcribe_openai(job_id, language, progress_callback)
+    elif p == "groq":
+        return _transcribe_groq(job_id, language, progress_callback)
     else:
         return _transcribe_local(job_id, language, progress_callback)
 
@@ -295,6 +299,288 @@ def _transcribe_openai(job_id: str, language: str = None, progress_callback=None
     return result
 
 
+# ── Groq (Whisper-large-v3 on LPU — fastest on market) ──────────────────────
+
+_GROQ_MAX_FILE_BYTES = 24 * 1024 * 1024  # 24MB safe limit (API max is 25MB)
+_GROQ_CHUNK_DURATION = 600               # 10 min chunks when splitting
+
+
+def _transcribe_groq(job_id: str, language: str = None, progress_callback=None) -> dict:
+    """Transcribe via Groq's Whisper-large-v3 endpoint.
+
+    Extremely fast (~10–30s for hours of audio) at $0.04/hr.
+    No diarization — the LLM analyzer infers speakers from text.
+
+    If the compact audio exceeds 25MB (long podcasts), it's automatically
+    split into chunks, each chunk is transcribed in parallel, and results
+    are merged with proper time offsets.
+    """
+    try:
+        from groq import Groq
+    except ImportError as exc:
+        raise RuntimeError(
+            "TRANSCRIPTION_PROVIDER=groq requires the groq package. "
+            "Install with `pip install groq`."
+        ) from exc
+
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    job_dir = Path(storage) / "jobs" / job_id
+    transcript_path = job_dir / "transcript.json"
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is required when TRANSCRIPTION_PROVIDER=groq")
+
+    if progress_callback:
+        progress_callback(5)
+
+    # ── Step 1: extract compact audio (mono 16kHz 48kbps) ────────────────
+    compact_path = _groq_extract_compact_audio(job_dir)
+    file_size = compact_path.stat().st_size
+
+    if progress_callback:
+        progress_callback(10)
+
+    # ── Step 2: transcribe (single-shot or chunked) ──────────────────────
+    client = Groq(api_key=api_key)
+    model = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3")
+
+    if file_size <= _GROQ_MAX_FILE_BYTES:
+        result = _groq_transcribe_single(client, model, compact_path, language)
+    else:
+        result = _groq_transcribe_chunked(
+            client, model, compact_path, language, job_dir, progress_callback,
+        )
+
+    # Indian-accent English misdetection fix (same as other providers)
+    if not language and _is_likely_misdetected_english(result):
+        if file_size <= _GROQ_MAX_FILE_BYTES:
+            result = _groq_transcribe_single(client, model, compact_path, "en")
+        else:
+            result = _groq_transcribe_chunked(
+                client, model, compact_path, "en", job_dir, progress_callback,
+            )
+        result["language"] = "en"
+        result["_language_corrected"] = True
+
+    _check_transcript_quality(result)
+
+    with open(transcript_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    _mirror_artifact_to_r2(job_id, "transcript.json")
+
+    if progress_callback:
+        progress_callback(100)
+
+    return result
+
+
+def _groq_extract_compact_audio(job_dir: Path) -> Path:
+    """Extract compact m4a from source video. Returns path to audio file."""
+    # Check if we already have compact audio
+    compact = job_dir / "groq_audio.m4a"
+    if compact.exists() and compact.stat().st_size > 1024:
+        return compact
+
+    # Find source media
+    source_path = job_dir / "original.mp4"
+    if not source_path.exists():
+        for ext in ("mkv", "webm", "m4a"):
+            cand = job_dir / f"original.{ext}"
+            if cand.exists():
+                source_path = cand
+                break
+        else:
+            audio_wav = job_dir / "audio.wav"
+            if audio_wav.exists():
+                source_path = audio_wav
+            else:
+                raise FileNotFoundError(f"No source media in {job_dir}")
+
+    # If source is already small audio, use it directly
+    if source_path.suffix.lower() in (".m4a", ".mp3", ".ogg"):
+        if source_path.stat().st_size <= _GROQ_MAX_FILE_BYTES:
+            return source_path
+
+    # Extract compact audio: mono, 16kHz, 48kbps AAC
+    # 48kbps (vs 32k for AssemblyAI) gives ~21MB for 1hr — stays under 25MB
+    # while preserving enough quality for Whisper accuracy.
+    import subprocess as _sp
+    from services.media_tools import ffmpeg_path as _ffmpeg
+    try:
+        _sp.run(
+            [_ffmpeg(), "-y", "-i", str(source_path), "-vn",
+             "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "48k",
+             str(compact)],
+            check=True, capture_output=True, timeout=600,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Audio extraction for Groq failed: {exc}") from exc
+
+    if not compact.exists() or compact.stat().st_size < 1024:
+        raise RuntimeError("Audio extraction produced empty file")
+
+    return compact
+
+
+def _groq_transcribe_single(client, model: str, audio_path: Path,
+                            language: str = None) -> dict:
+    """Transcribe a single file under 25MB."""
+    kwargs = {
+        "model": model,
+        "response_format": "verbose_json",
+        "timestamp_granularities": ["segment", "word"],
+    }
+    if language:
+        kwargs["language"] = language
+
+    with open(audio_path, "rb") as f:
+        response = client.audio.transcriptions.create(
+            file=(audio_path.name, f.read()),
+            **kwargs,
+        )
+
+    return _groq_response_to_dict(response)
+
+
+def _groq_transcribe_chunked(client, model: str, audio_path: Path,
+                             language: str, job_dir: Path,
+                             progress_callback=None) -> dict:
+    """Split audio into chunks, transcribe each, merge with time offsets."""
+    import subprocess as _sp
+    from services.media_tools import ffmpeg_path as _ffmpeg, ffprobe_path as _ffprobe
+
+    # Get total duration
+    try:
+        probe = _sp.run(
+            [_ffprobe(), "-v", "error", "-show_entries", "format=duration",
+             "-of", "csv=p=0", str(audio_path)],
+            capture_output=True, text=True, timeout=30,
+        )
+        total_duration = float(probe.stdout.strip())
+    except Exception:
+        total_duration = 7200  # fallback 2hr
+
+    # Split into chunks
+    chunk_dir = job_dir / "groq_chunks"
+    chunk_dir.mkdir(exist_ok=True)
+    chunks = []
+    offset = 0.0
+    chunk_idx = 0
+
+    while offset < total_duration:
+        chunk_file = chunk_dir / f"chunk_{chunk_idx:03d}.m4a"
+        if not chunk_file.exists():
+            _sp.run(
+                [_ffmpeg(), "-y", "-i", str(audio_path),
+                 "-ss", str(offset), "-t", str(_GROQ_CHUNK_DURATION),
+                 "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-ar", "16000",
+                 str(chunk_file)],
+                check=True, capture_output=True, timeout=120,
+            )
+        chunks.append((chunk_file, offset))
+        offset += _GROQ_CHUNK_DURATION
+        chunk_idx += 1
+
+    # Transcribe each chunk
+    all_segments = []
+    detected_lang = "unknown"
+
+    for i, (chunk_file, time_offset) in enumerate(chunks):
+        kwargs = {
+            "model": model,
+            "response_format": "verbose_json",
+            "timestamp_granularities": ["segment", "word"],
+        }
+        if language:
+            kwargs["language"] = language
+
+        # Retry with backoff — Groq occasionally returns 500s
+        response = None
+        for attempt in range(1, 4):
+            try:
+                with open(chunk_file, "rb") as f:
+                    response = client.audio.transcriptions.create(
+                        file=(chunk_file.name, f.read()),
+                        **kwargs,
+                    )
+                break
+            except Exception as exc:
+                if attempt < 3:
+                    import time as _time
+                    _time.sleep(2 ** attempt)
+                else:
+                    raise RuntimeError(
+                        f"Groq transcription failed on chunk {i+1}/{len(chunks)} "
+                        f"after 3 attempts: {exc}"
+                    ) from exc
+
+        chunk_result = _groq_response_to_dict(response)
+        if i == 0:
+            detected_lang = chunk_result.get("language", "unknown")
+
+        # Offset all timestamps
+        for seg in chunk_result.get("segments", []):
+            seg["start"] += time_offset
+            seg["end"] += time_offset
+            for w in seg.get("words", []):
+                w["start"] += time_offset
+                w["end"] += time_offset
+            all_segments.append(seg)
+
+        if progress_callback:
+            pct = 10 + int((i + 1) / len(chunks) * 85)
+            progress_callback(pct)
+
+    # Cleanup chunk files
+    import shutil
+    shutil.rmtree(chunk_dir, ignore_errors=True)
+
+    return {"language": detected_lang, "segments": all_segments}
+
+
+def _groq_response_to_dict(response) -> dict:
+    """Convert Groq transcription response to our standard format."""
+    all_words = response.words or []
+    segments = []
+
+    for seg in (response.segments or []):
+        # Match words to segment by time range
+        seg_words = [
+            w for w in all_words
+            if w.start >= seg.start and w.end <= seg.end + 0.1
+        ]
+        segments.append({
+            "start": seg.start,
+            "end": seg.end,
+            "text": seg.text.strip(),
+            "words": [
+                {"word": w.word, "start": w.start, "end": w.end, "probability": 1.0}
+                for w in seg_words
+            ],
+        })
+
+    # Fallback: build segments from words if no segment metadata
+    if not segments and all_words:
+        current = None
+        for w in all_words:
+            if current is None or w.start - current["start"] > 10:
+                current = {"start": w.start, "end": w.end, "text": "", "words": []}
+                segments.append(current)
+            current["end"] = w.end
+            current["text"] = (current["text"] + " " + w.word).strip()
+            current["words"].append(
+                {"word": w.word, "start": w.start, "end": w.end, "probability": 1.0}
+            )
+
+    return {
+        "language": getattr(response, "language", None) or "unknown",
+        "segments": segments,
+    }
+
+
 # ── AssemblyAI ───────────────────────────────────────────────────────────────
 
 def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=None) -> dict:
@@ -316,45 +602,36 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
     # itself, skipping our local pull + ffmpeg compact extract + POST upload.
     # Falls back to the local upload path when R2 isn't ready (e.g. URL flow
     # where the background mirror hasn't completed yet).
+    #
+    # IMPORTANT: we upload the COMPACT AUDIO (mono 16kHz 32kbps m4a), not the
+    # full video. A 2hr 1080p video is ~1-2GB; the compact audio is ~28MB.
+    # Giving AAI the full video R2 URL caused 30+ min transcription times
+    # because AAI had to download the entire video before extracting audio.
     upload_target = None
-    try:
-        from services import r2 as _r2
-        if _r2.is_enabled():
-            r2_key = _r2.source_key(job_id)
-            if _r2.object_exists(r2_key):
-                # 2hr TTL so long AssemblyAI queue + 2hr podcast fetch can
-                # complete before the URL expires.
-                upload_target = _r2.object_url(r2_key, ttl=7200)
-    except Exception as exc:
-        print(f"[transcriber] r2 url lookup failed ({exc}), using local upload", flush=True)
-        upload_target = None
 
-    if upload_target is None:
-        # Local-upload fallback: find source media (mp4/mkv/webm/m4a/wav).
-        source_path = job_dir / "original.mp4"
-        if not source_path.exists():
-            for ext in ("mkv", "webm", "m4a"):
-                cand = job_dir / f"original.{ext}"
-                if cand.exists():
-                    source_path = cand
-                    break
+    # Always extract compact audio first — ~30s locally, saves 20+ min on AAI
+    source_path = job_dir / "original.mp4"
+    if not source_path.exists():
+        for ext in ("mkv", "webm", "m4a"):
+            cand = job_dir / f"original.{ext}"
+            if cand.exists():
+                source_path = cand
+                break
+        else:
+            audio_fallback = job_dir / "audio.wav"
+            if audio_fallback.exists():
+                source_path = audio_fallback
             else:
-                audio_fallback = job_dir / "audio.wav"
-                if audio_fallback.exists():
-                    source_path = audio_fallback
-                else:
-                    raise FileNotFoundError(
-                        f"No source media for transcription in {job_dir}"
-                    )
+                raise FileNotFoundError(
+                    f"No source media for transcription in {job_dir}"
+                )
 
-        # Extract a compact m4a (AAC mono 16kHz 32kbps) for the upload. A 1hr
-        # video shrinks from ~1GB → ~15MB, making the Railway→AssemblyAI POST
-        # reliable. Skip if source is already small audio.
-        upload_path = source_path
-        if source_path.suffix.lower() in (".mp4", ".mkv", ".webm"):
-            import subprocess as _sp
-            from services.media_tools import ffmpeg_path as _ffmpeg
-            compact = job_dir / "upload_audio.m4a"
+    upload_path = source_path
+    if source_path.suffix.lower() in (".mp4", ".mkv", ".webm", ".wav"):
+        import subprocess as _sp
+        from services.media_tools import ffmpeg_path as _ffmpeg
+        compact = job_dir / "upload_audio.m4a"
+        if not compact.exists() or compact.stat().st_size < 1024:
             try:
                 _sp.run(
                     [_ffmpeg(), "-y", "-i", str(source_path), "-vn",
@@ -366,7 +643,10 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
                     upload_path = compact
             except Exception as exc:
                 print(f"[transcriber] compact audio extract failed ({exc}), uploading source", flush=True)
-        upload_target = str(upload_path)
+        else:
+            upload_path = compact
+
+    upload_target = str(upload_path)
 
     api_key = os.getenv("ASSEMBLYAI_API_KEY")
     if not api_key:

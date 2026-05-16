@@ -1,6 +1,8 @@
 import os
 import json
 import logging
+import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
 from pathlib import Path
@@ -11,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 
 CHUNK_WINDOW_SECONDS = 1200  # 20-minute windows keep each prompt under ~30k tokens
+_LLM_MAX_RETRIES = 3
+_LLM_BASE_DELAY = 2  # seconds; doubles each retry
 
 
 def analyze_transcript(job_id: str, options: dict, progress_callback=None) -> list:
@@ -29,8 +33,14 @@ def analyze_transcript(job_id: str, options: dict, progress_callback=None) -> li
 
     clips = _run_analysis(job_id, transcript, enriched, options, progress_callback)
 
-    with open(analysis_path, "w", encoding="utf-8") as f:
-        json.dump(clips, f, ensure_ascii=False, indent=2)
+    # Only cache non-empty results. If the LLM failed on all chunks, we don't
+    # want to persist an empty array — that would make retries load the cached
+    # empty list instead of re-running the analysis.
+    if clips:
+        with open(analysis_path, "w", encoding="utf-8") as f:
+            json.dump(clips, f, ensure_ascii=False, indent=2)
+    else:
+        logger.warning("Skipping analysis cache — zero clips produced for job %s", job_id)
 
     if progress_callback:
         progress_callback(100)
@@ -88,40 +98,121 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
 
 
 def _llm_call(client: OpenAI, transcript: dict, chunk: list, options: dict) -> list:
-    """Single chunk → list of candidate dicts. Returns [] on failure."""
+    """Single chunk → list of candidate dicts. Returns [] on failure.
+
+    Retries up to _LLM_MAX_RETRIES times with exponential backoff to handle
+    transient OpenRouter 429/500 errors that silently kill long-podcast analysis.
+    """
     prompt = _build_prompt(transcript, chunk, options)
     model = os.getenv("ANALYZER_MODEL", "anthropic/claude-sonnet-4-5")
-    max_tokens = int(os.getenv("ANALYZER_MAX_TOKENS", "2000"))
-    try:
-        response = client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return _parse_clips(response.choices[0].message.content.strip())
-    except Exception as exc:
-        logger.warning("OpenRouter chunk call failed: %s", exc)
-        return []
+    max_tokens = int(os.getenv("ANALYZER_MAX_TOKENS", "4096"))
+    chunk_start = chunk[0]["start"] if chunk else 0
+    chunk_end = chunk[-1]["end"] if chunk else 0
+    prompt_len = len(prompt)
+
+    logger.info(
+        "LLM call: chunk %.0f-%.0fs, prompt_len=%d chars, model=%s, max_tokens=%d",
+        chunk_start, chunk_end, prompt_len, model, max_tokens,
+    )
+
+    last_exc = None
+    for attempt in range(1, _LLM_MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            raw = response.choices[0].message.content or ""
+            raw = raw.strip()
+            logger.info(
+                "LLM response: chunk %.0f-%.0fs, response_len=%d chars (attempt %d)",
+                chunk_start, chunk_end, len(raw), attempt,
+            )
+            clips = _parse_clips(raw)
+            if clips:
+                logger.info(
+                    "Parsed %d clip candidates from chunk %.0f-%.0fs",
+                    len(clips), chunk_start, chunk_end,
+                )
+                return clips
+            else:
+                # Model returned a response but no parseable clips —
+                # log the raw output for debugging and retry.
+                logger.warning(
+                    "LLM returned unparseable/empty response for chunk %.0f-%.0fs "
+                    "(attempt %d/%d). Raw response (first 500 chars): %s",
+                    chunk_start, chunk_end, attempt, _LLM_MAX_RETRIES,
+                    raw[:500],
+                )
+                last_exc = ValueError("Empty/unparseable LLM response")
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "OpenRouter chunk call failed for %.0f-%.0fs (attempt %d/%d): %s",
+                chunk_start, chunk_end, attempt, _LLM_MAX_RETRIES, exc,
+            )
+
+        if attempt < _LLM_MAX_RETRIES:
+            delay = _LLM_BASE_DELAY * (2 ** (attempt - 1))
+            logger.info("Retrying in %ds...", delay)
+            time.sleep(delay)
+
+    logger.error(
+        "All %d LLM attempts failed for chunk %.0f-%.0fs. Last error: %s",
+        _LLM_MAX_RETRIES, chunk_start, chunk_end, last_exc,
+    )
+    return []
 
 
 def _analyze_chunks_parallel(client: OpenAI, transcript: dict, chunks: list,
                               options: dict, progress_callback, base_progress: int,
                               span: int) -> list:
-    """Dispatch all chunks in parallel via thread pool. Aggregates results."""
+    """Dispatch all chunks in parallel via thread pool. Aggregates results.
+
+    Caps parallelism at 3 for large jobs to avoid OpenRouter rate limits
+    that were silently killing all chunk calls for 2hr podcasts.
+    """
     if not chunks:
         return []
-    workers = min(len(chunks), int(os.getenv("ANALYZER_CHUNK_WORKERS", "8")))
+    # Cap at 3 concurrent LLM calls — OpenRouter rate-limits when we blast 6+
+    # requests simultaneously for long podcasts. Each request is large (~30k
+    # tokens), so the per-minute token budget gets exhausted.
+    default_workers = "3" if len(chunks) > 4 else "4"
+    workers = min(len(chunks), int(os.getenv("ANALYZER_CHUNK_WORKERS", default_workers)))
     candidates: list = []
     completed = 0
+    failed_chunks = 0
+
+    logger.info("Analyzing %d chunks with %d parallel workers", len(chunks), workers)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(_llm_call, client, transcript, chunk, options)
                    for chunk in chunks]
         from concurrent.futures import as_completed as _as_completed
         for fut in _as_completed(futures):
-            candidates.extend(fut.result())
+            result = fut.result()
+            if result:
+                candidates.extend(result)
+            else:
+                failed_chunks += 1
             completed += 1
             if progress_callback:
                 progress_callback(base_progress + int(completed / len(chunks) * span))
+
+    if failed_chunks > 0:
+        logger.warning(
+            "%d/%d chunks returned zero candidates. Total candidates so far: %d",
+            failed_chunks, len(chunks), len(candidates),
+        )
+    if not candidates:
+        logger.error(
+            "ALL %d chunks returned zero candidates — LLM analysis produced nothing. "
+            "This usually means the model is timing out, rate-limited, or returning "
+            "malformed JSON. Check OpenRouter dashboard for errors.",
+            len(chunks),
+        )
+
     return candidates
 
 
@@ -309,26 +400,90 @@ Return up to {max_clips} clips ranked by score. Only include clips scoring above
 
 
 def _parse_clips(text: str) -> list:
-    # Strip markdown code fences if present
-    if "```" in text:
-        lines = text.split("\n")
-        inner = []
-        in_block = False
-        for line in lines:
-            if line.strip().startswith("```"):
-                in_block = not in_block
-                continue
-            if in_block or not line.strip().startswith("```"):
-                inner.append(line)
-        text = "\n".join(inner)
+    """Extract a JSON array of clip candidates from LLM output.
 
+    Handles: raw JSON, markdown-fenced JSON, and truncated JSON from
+    max_tokens cutoff (the #1 cause of 'no clips' on long podcasts).
+    """
+    if not text:
+        return []
+
+    # Strategy 1: Strip markdown code fences and extract inner content
+    if "```" in text:
+        # Use regex to extract content between first ``` and last ```
+        match = re.search(r"```(?:json)?\s*\n?(.*?)\n?\s*```", text, re.DOTALL)
+        if match:
+            text = match.group(1).strip()
+
+    # Strategy 2: Try parsing as-is
+    clips = _try_parse_json_array(text)
+    if clips is not None:
+        return clips
+
+    # Strategy 3: Extract the first JSON array from the text (model may have
+    # added commentary before/after)
+    match = re.search(r"(\[\s*\{.*)", text, re.DOTALL)
+    if match:
+        candidate = match.group(1).strip()
+        clips = _try_parse_json_array(candidate)
+        if clips is not None:
+            return clips
+
+        # Strategy 4: Fix truncated JSON from max_tokens cutoff.
+        # The model ran out of output tokens mid-JSON. Try to salvage
+        # whatever complete objects exist before the truncation point.
+        clips = _salvage_truncated_json(candidate)
+        if clips:
+            logger.warning(
+                "Salvaged %d clips from truncated JSON (model hit max_tokens)",
+                len(clips),
+            )
+            return clips
+
+    logger.warning("Failed to parse any clips from LLM output (len=%d)", len(text))
+    return []
+
+
+def _try_parse_json_array(text: str) -> list | None:
+    """Try to parse text as a JSON array. Returns list or None."""
     try:
-        clips = json.loads(text)
-        if isinstance(clips, list):
-            for i, c in enumerate(clips):
+        data = json.loads(text)
+        if isinstance(data, list):
+            for i, c in enumerate(data):
                 if "rank" not in c:
                     c["rank"] = i + 1
-            return clips
-    except json.JSONDecodeError:
+            return data
+    except (json.JSONDecodeError, ValueError):
         pass
-    return []
+    return None
+
+
+def _salvage_truncated_json(text: str) -> list:
+    """Extract complete JSON objects from a truncated array.
+
+    When the LLM hits max_tokens mid-output, the JSON array is cut off like:
+      [{...}, {...}, {"start  ← truncated here
+    We extract all complete objects before the cut.
+    """
+    results = []
+    # Find all complete top-level objects within the array
+    depth = 0
+    obj_start = None
+    for i, ch in enumerate(text):
+        if ch == "{":
+            if depth == 0:
+                obj_start = i
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0 and obj_start is not None:
+                try:
+                    obj = json.loads(text[obj_start:i + 1])
+                    if isinstance(obj, dict) and "start_seconds" in obj:
+                        if "rank" not in obj:
+                            obj["rank"] = len(results) + 1
+                        results.append(obj)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+                obj_start = None
+    return results

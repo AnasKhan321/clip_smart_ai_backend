@@ -24,8 +24,8 @@ def diarize(job_id: str, progress_callback=None) -> list:
             progress_callback(100)
         return load_diarization(job_id)
 
-    if p == "openai":
-        # OpenAI Whisper API has no diarization
+    if p == "openai" or p == "groq":
+        # OpenAI Whisper API and Groq have no diarization
         if progress_callback:
             progress_callback(100)
         return []

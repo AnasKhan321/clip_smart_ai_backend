@@ -254,16 +254,11 @@ def run_full_pipeline(self, job_id: str, options: dict):
             job_dir = get_job_dir(job_id)
             video_path = job_dir / "original.mp4"
 
-            # Direct-upload path: R2 already has the source. Kick AssemblyAI
-            # off NOW (against the R2 URL) so its 2–5 min processing runs in
-            # parallel with our R2→worker pull, audio extract, and probe.
-            if job.r2_source_key and r2.is_enabled():
-                try:
-                    from services.transcriber import submit_async as _xcribe_submit
-                    _xcribe_submit(job_id)
-                except Exception as exc:
-                    logger.warning("transcribe pre-submit failed for %s: %s",
-                                   job_id, exc)
+            # NOTE: we used to pre-submit to AssemblyAI here against the R2
+            # URL, but that sent the FULL 1-2GB video. AAI had to download it
+            # all before extracting audio → 30+ min for a 2hr podcast.
+            # Now we always extract compact audio locally (~30s) and upload
+            # that to AAI in stage 2. Total transcription drops to ~5 min.
 
             # New path: direct browser→R2 upload. Pull from R2 to scratch.
             if job.r2_source_key and not video_path.exists():
@@ -338,7 +333,22 @@ def run_full_pipeline(self, job_id: str, options: dict):
         )
 
         if not clips:
-            _set_job_status(db, job_id, "ready", 100)
+            duration = job.video_duration_seconds or 0
+            if duration > 1800:  # > 30 min — zero clips is almost certainly a bug
+                logger.error(
+                    "Zero clips from a %.0f-minute video (job %s). "
+                    "This is likely an LLM analysis failure, not a content quality issue. "
+                    "Check analyzer logs for OpenRouter errors.",
+                    duration / 60, job_id,
+                )
+                _set_job_status(
+                    db, job_id, "ready", 100,
+                    error="AI analysis completed but found no clip-worthy moments. "
+                          "This is unusual for long content — try regenerating.",
+                )
+            else:
+                logger.warning("No clip candidates for job %s (duration=%.0fs)", job_id, duration)
+                _set_job_status(db, job_id, "ready", 100)
             return
 
         # Stage 5: Render clips in parallel
