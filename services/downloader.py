@@ -94,7 +94,11 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
         "progress_hooks": [ydl_progress_hook],
         "retries": 3,
         "fragment_retries": 3,
-        "extractor_args": {"youtube": {"player_client": ["web", "tv_downgraded", "web_safari"]}},
+        # Multiple player clients = yt-dlp tries each. Android/iOS clients
+        # often work without fresh cookies because they use mobile API.
+        "extractor_args": {"youtube": {"player_client": [
+            "android", "ios", "web_safari", "tv_downgraded", "web"
+        ]}},
         "js_runtimes": js_runtimes,
         "http_headers": {
             "User-Agent": (
