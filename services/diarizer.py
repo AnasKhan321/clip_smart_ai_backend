@@ -83,6 +83,13 @@ def load_diarization(job_id: str) -> list:
     storage = os.getenv("STORAGE_PATH", "./storage")
     path = Path(storage) / "jobs" / job_id / "diarization.json"
     if not path.exists():
+        # Try restore from R2 mirror (worker may have restarted).
+        try:
+            from services.transcriber import _ensure_local_artifact
+            _ensure_local_artifact(job_id, "diarization.json")
+        except Exception:
+            pass
+    if not path.exists():
         return []
     with open(path, "r") as f:
         data = json.load(f)

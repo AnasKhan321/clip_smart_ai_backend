@@ -31,6 +31,52 @@ def _provider() -> str:
     return os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
 
 
+# ── R2 mirror helpers (persist transcript/diarization across worker restarts) ─
+
+def _r2_artifact_key(job_id: str, filename: str) -> str:
+    return f"jobs/{job_id}/{filename}"
+
+
+def _ensure_local_artifact(job_id: str, filename: str) -> bool:
+    """If `{job_dir}/{filename}` missing locally but present in R2, pull it
+    back to local disk so callers can read it. Returns True if file now
+    exists locally.
+    """
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    local = Path(storage) / "jobs" / job_id / filename
+    if local.exists():
+        return True
+    try:
+        from services import r2 as _r2
+        if not _r2.is_enabled():
+            return False
+        key = _r2_artifact_key(job_id, filename)
+        if not _r2.object_exists(key):
+            return False
+        local.parent.mkdir(parents=True, exist_ok=True)
+        _r2.download_file(key, str(local))
+        return local.exists()
+    except Exception as exc:
+        print(f"[transcriber] r2 restore failed for {filename} ({exc})", flush=True)
+        return False
+
+
+def _mirror_artifact_to_r2(job_id: str, filename: str) -> None:
+    """Background upload of small JSON artifact to R2. Fire-and-forget."""
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    local = Path(storage) / "jobs" / job_id / filename
+    if not local.exists():
+        return
+    try:
+        from services import r2 as _r2
+        if not _r2.is_enabled():
+            return
+        key = _r2_artifact_key(job_id, filename)
+        _r2.upload_in_background(str(local), key, content_type="application/json")
+    except Exception as exc:
+        print(f"[transcriber] r2 mirror failed for {filename} ({exc})", flush=True)
+
+
 def submit_async(job_id: str, language: str = None) -> Future:
     """Kick off transcription in background. Idempotent — safe to call
     multiple times, returns the same Future. Returns None if disk cache
@@ -61,6 +107,10 @@ def _run_transcribe(job_id: str, language: str = None) -> dict:
 def transcribe(job_id: str, language: str = None, progress_callback=None) -> dict:
     storage = os.getenv("STORAGE_PATH", "./storage")
     transcript_path = Path(storage) / "jobs" / job_id / "transcript.json"
+    # Restore from R2 if local disk was wiped (worker restart / redeploy).
+    if not transcript_path.exists():
+        _ensure_local_artifact(job_id, "transcript.json")
+        _ensure_local_artifact(job_id, "diarization.json")
     if transcript_path.exists():
         if progress_callback:
             progress_callback(100)
@@ -136,6 +186,8 @@ def _transcribe_local(job_id: str, language: str = None, progress_callback=None)
 
     with open(transcript_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+
+    _mirror_artifact_to_r2(job_id, "transcript.json")
 
     if progress_callback:
         progress_callback(100)
@@ -216,6 +268,8 @@ def _transcribe_openai(job_id: str, language: str = None, progress_callback=None
 
     with open(transcript_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
+
+    _mirror_artifact_to_r2(job_id, "transcript.json")
 
     if progress_callback:
         progress_callback(100)
@@ -367,6 +421,9 @@ def _transcribe_assemblyai(job_id: str, language: str = None, progress_callback=
     with open(diarization_path, "w") as f:
         json.dump(diarization, f, indent=2)
 
+    _mirror_artifact_to_r2(job_id, "transcript.json")
+    _mirror_artifact_to_r2(job_id, "diarization.json")
+
     if progress_callback:
         progress_callback(100)
 
@@ -422,6 +479,8 @@ def load_transcript(job_id: str) -> dict:
         return cached
     storage = os.getenv("STORAGE_PATH", "./storage")
     path = Path(storage) / "jobs" / job_id / "transcript.json"
+    if not path.exists():
+        _ensure_local_artifact(job_id, "transcript.json")
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
     if len(_transcript_cache) >= _TRANSCRIPT_CACHE_MAX:
