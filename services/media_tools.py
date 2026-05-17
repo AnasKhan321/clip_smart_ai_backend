@@ -161,8 +161,13 @@ def encoder_video_opts(profile: str = "preview") -> list[str]:
     # collectively oversubscribe the CPU. ffmpeg defaults to all cores per
     # process which thrashes under ThreadPoolExecutor.
     if profile == "face_export":
-        crf, preset = "18", "slow"
-        threads = os.getenv("FFMPEG_THREADS", "2")
+        # Railway shared-vCPU: preset=slow + CRF 18 caused 10-min timeouts on
+        # ~60s clips. preset=faster + CRF 21 cuts encode 4-5x; perceptual
+        # quality on 1080x1920 short-form is indistinguishable at typical
+        # viewing distances. Override with FFMPEG_FACE_PRESET / FFMPEG_FACE_CRF.
+        preset = os.getenv("FFMPEG_FACE_PRESET", "faster")
+        crf = os.getenv("FFMPEG_FACE_CRF", "21")
+        threads = os.getenv("FFMPEG_THREADS", "0")  # 0 = use all available
         return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-tune", "film",
                 "-pix_fmt", "yuv420p", "-threads", threads]
     crf = "20" if profile == "export" else "26"

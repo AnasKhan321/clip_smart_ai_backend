@@ -640,8 +640,12 @@ def compute_face_track(job_id: str, progress_callback=None) -> List[dict]:
     mp_detector = None
     try:
         import mediapipe as mp
+        # model_selection=0 (short-range, ≤2m subject) is 2-3x faster than 1
+        # (full-range) and accuracy parity for talking-head/podcast clips.
+        # Override with FACE_MODEL_SELECTION=1 if subjects are far.
+        _mp_model = int(os.getenv("FACE_MODEL_SELECTION", "0"))
         mp_detector = mp.solutions.face_detection.FaceDetection(
-            model_selection=1, min_detection_confidence=_FACE_MIN_CONFIDENCE
+            model_selection=_mp_model, min_detection_confidence=_FACE_MIN_CONFIDENCE
         )
     except Exception:
         mp_detector = None
