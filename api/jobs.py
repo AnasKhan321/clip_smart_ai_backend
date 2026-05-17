@@ -19,6 +19,65 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+class _SourceInvalid(Exception):
+    pass
+
+
+def _validate_r2_source(key: str) -> None:
+    """ffprobe the R2 object via presigned URL. Reject if no audio stream,
+    if probe fails outright, or if audio/video durations diverge wildly
+    (telltale sign of a broken upload / busted encoder).
+
+    Streams probe over the network; does not download the file.
+    """
+    import json as _json
+    import subprocess as _sp
+
+    url = r2.object_url(key, ttl=1800)
+    try:
+        proc = _sp.run(
+            [ffprobe_path(), "-v", "error", "-print_format", "json",
+             "-show_streams", "-show_format", url],
+            capture_output=True, timeout=60, check=False,
+        )
+    except _sp.TimeoutExpired:
+        raise _SourceInvalid("Source file unreadable (ffprobe timeout).")
+
+    if proc.returncode != 0:
+        raise _SourceInvalid(
+            "Source file is corrupt or not a supported video format. "
+            "Re-encode with ffmpeg and retry."
+        )
+
+    try:
+        meta = _json.loads(proc.stdout or "{}")
+    except _json.JSONDecodeError:
+        raise _SourceInvalid("Source file is corrupt (probe returned no metadata).")
+
+    streams = meta.get("streams") or []
+    audio = [s for s in streams if s.get("codec_type") == "audio"]
+    video = [s for s in streams if s.get("codec_type") == "video"]
+
+    if not audio:
+        raise _SourceInvalid("Source has no audio track — nothing to transcribe.")
+
+    def _dur(s):
+        try:
+            return float(s.get("duration") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    a_dur = max((_dur(s) for s in audio), default=0.0)
+    v_dur = max((_dur(s) for s in video), default=0.0)
+    if v_dur > 0 and a_dur > 0:
+        ratio = max(a_dur, v_dur) / min(a_dur, v_dur)
+        if ratio > 3.0:
+            raise _SourceInvalid(
+                f"Source is malformed: audio ({a_dur:.0f}s) and video "
+                f"({v_dur:.0f}s) durations do not match. Re-encode and retry."
+            )
+
+
 def run_task_in_background(task, *args):
     if os.getenv("RUN_JOBS_INLINE", "false").lower() in ("1", "true", "yes", "on"):
         Thread(target=lambda: task.apply(args=args, throw=True), daemon=True).start()
@@ -134,6 +193,16 @@ def create_job_from_r2(
         r2.abort_multipart_upload(body.key, body.upload_id)
         raise HTTPException(status_code=400,
                             detail=f"Failed to finalize R2 upload: {exc}")
+
+    try:
+        _validate_r2_source(body.key)
+    except _SourceInvalid as exc:
+        # Delete the broken upload so it doesn't eat R2 quota.
+        try:
+            r2.get_client().delete_object(Bucket=r2.bucket(), Key=body.key)
+        except Exception:
+            pass
+        raise HTTPException(status_code=400, detail=str(exc))
 
     cost = cost_for_job(body.max_clips)
     job = Job(
