@@ -159,23 +159,24 @@ def _rerender_clip(clip: Clip, db: Session):
     else:
         clip.final_clip_path = result["final_clip_path"]
         clip.raw_clip_path = None
-        clip.status = "ready"
+        # Sync R2 upload before declaring ready — daemon thread uploads die
+        # on Railway redeploy and leave the row pointing at a missing file.
         if r2.is_enabled() and result["final_clip_path"]:
             key = r2.clip_key(clip.job_id, clip.rank)
-            clip.r2_clip_key = key
-            _clip_id = clip.id
-            def _clear_key(k, cid=_clip_id):
-                from database import SessionLocal
-                s = SessionLocal()
-                try:
-                    c = s.query(Clip).filter(Clip.id == cid).first()
-                    if c and c.r2_clip_key == k:
-                        c.r2_clip_key = None
-                        s.commit()
-                finally:
-                    s.close()
-            r2.upload_in_background(result["final_clip_path"], key,
-                                    on_failure=_clear_key)
+            try:
+                r2.upload_file(result["final_clip_path"], key)
+                if r2.object_exists(key):
+                    clip.r2_clip_key = key
+                    clip.status = "ready"
+                else:
+                    clip.status = "failed"
+                    clip.error_message = "R2 upload verify failed"
+            except Exception as upload_exc:
+                logger.exception("R2 rerender upload failed for clip %s", clip.id)
+                clip.status = "failed"
+                clip.error_message = f"R2 upload: {upload_exc}"[:500]
+        else:
+            clip.status = "ready"
 
     db.commit()
 
@@ -261,16 +262,30 @@ def _spawn_export_background(clip_id: str, job_id: str,
             row = s.query(Clip).filter(Clip.id == clip_id).first()
             if row is None:
                 return
-            row.status = "exported"
             row.final_clip_path = export_path
             row.error_message = None
+            # Sync R2 upload before marking exported. We're already in a
+            # background thread; daemon-thread uploads die on uvicorn restart
+            # and the user would see "exported" with a broken download URL.
             if r2.is_enabled():
                 key = f"jobs/{job_id}/clips/clip_{row.rank:03d}_export.mp4"
-                row.r2_clip_key = key
-                # upload_in_background already runs in its own thread
-                r2.upload_in_background(export_path, key)
+                try:
+                    r2.upload_file(export_path, key)
+                    if r2.object_exists(key):
+                        row.r2_clip_key = key
+                        row.status = "exported"
+                    else:
+                        row.status = "failed"
+                        row.error_message = "R2 upload verify failed"
+                except Exception as upload_exc:
+                    logger.exception("R2 export upload failed for clip %s", clip_id)
+                    row.status = "failed"
+                    row.error_message = f"R2 upload: {upload_exc}"[:500]
+            else:
+                row.status = "exported"
             s.commit()
-            logger.info("export done: clip=%s path=%s", clip_id, export_path)
+            logger.info("export done: clip=%s path=%s status=%s",
+                        clip_id, export_path, row.status)
         finally:
             try:
                 s.close()

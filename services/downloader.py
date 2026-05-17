@@ -527,6 +527,7 @@ def _get_duration(video_path: str) -> float:
         [ffprobe_path(), "-v", "quiet", "-print_format", "json", "-show_format", video_path],
         capture_output=True,
         text=True,
+        timeout=30,
         check=True,
     )
     data = json.loads(result.stdout)

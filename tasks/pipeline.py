@@ -115,12 +115,43 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
     if not clips:
         return
 
+    # (a) Guarantee source video exists locally. Pipeline may resume on a
+    #     fresh worker (Celery retry, redeploy) where the ephemeral disk
+    #     was wiped — pull it back from R2 once before spawning threads.
+    try:
+        from services.exporter import _ensure_local_source
+        _ensure_local_source(job_id)
+    except Exception as exc:
+        logger.error("source restore failed for %s: %s", job_id, exc)
+        # Mark every clip failed with a clear reason and stop early.
+        for c in clips:
+            c.status = "failed"
+            c.error_message = f"source restore failed: {exc}"
+        db.commit()
+        return
+
+    # (b) Idempotency: on Celery retry, some clips may already be rendered
+    #     and in R2. Skip those — re-rendering costs time + risks corrupting
+    #     a valid file with a half-written re-render.
+    pending: list = []
+    for c in clips:
+        if c.status == "ready" and c.r2_clip_key and r2.is_enabled():
+            try:
+                if r2.object_exists(c.r2_clip_key):
+                    continue  # already done, skip
+            except Exception:
+                pass  # any probe failure → re-render to be safe
+        pending.append(c)
+
+    if not pending:
+        return
+
     workers = _render_worker_count()
-    total = len(clips)
+    total = len(pending)
     done = 0
 
-    # Pre-flight: mark all as rendering
-    for clip_row in clips:
+    # Pre-flight: mark pending as rendering
+    for clip_row in pending:
         clip_row.status = "rendering"
         clip_row.error_message = None
     db.commit()
@@ -135,9 +166,9 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
             "user_start_seconds": c.user_start_seconds,
             "user_end_seconds": c.user_end_seconds,
         }
-        for c in clips
+        for c in pending
     ]
-    by_id = {c.id: c for c in clips}
+    by_id = {c.id: c for c in pending}
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
@@ -158,23 +189,27 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
             else:
                 clip_row.final_clip_path = res["final_clip_path"]
                 clip_row.raw_clip_path = None  # No separate raw in single-pass
-                clip_row.status = "ready"
-                # Push to R2 in background — serve via CDN, free egress.
+                # (c) Upload to R2 SYNCHRONOUSLY before marking ready.
+                #     Daemon-thread uploads die on Railway redeploy → clip row
+                #     ends up pointing at a non-existent R2 object → user
+                #     downloads return 404. Block until R2 confirms, then commit.
                 if r2.is_enabled() and res["final_clip_path"]:
                     key = r2.clip_key(job_id, clip_row.rank)
-                    clip_row.r2_clip_key = key
-                    _clip_id = clip_row.id
-                    def _clear_key(k, cid=_clip_id):
-                        _db = SessionLocal()
-                        try:
-                            c = _db.query(Clip).filter(Clip.id == cid).first()
-                            if c and c.r2_clip_key == k:
-                                c.r2_clip_key = None
-                                _db.commit()
-                        finally:
-                            _db.close()
-                    r2.upload_in_background(res["final_clip_path"], key,
-                                            on_failure=_clear_key)
+                    try:
+                        r2.upload_file(res["final_clip_path"], key)
+                        if r2.object_exists(key):
+                            clip_row.r2_clip_key = key
+                            clip_row.status = "ready"
+                        else:
+                            clip_row.status = "failed"
+                            clip_row.error_message = "R2 upload verify failed"
+                    except Exception as upload_exc:
+                        logger.exception("R2 upload failed for clip %s",
+                                         clip_row.id)
+                        clip_row.status = "failed"
+                        clip_row.error_message = f"R2 upload: {upload_exc}"[:500]
+                else:
+                    clip_row.status = "ready"
             db.commit()
             done += 1
             pct = progress_offset + int(done / total * (100 - progress_offset))

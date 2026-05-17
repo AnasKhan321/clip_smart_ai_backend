@@ -42,7 +42,7 @@ def probe_source_dims(source_path: str) -> tuple[int, int]:
         [ffprobe_path(), "-v", "error", "-select_streams", "v:0",
          "-show_entries", "stream=width,height",
          "-of", "csv=p=0:s=x", source_path],
-        capture_output=True, text=True, check=True,
+        capture_output=True, text=True, check=True, timeout=30,
     )
     w, h = result.stdout.strip().split("x")
     return int(w), int(h)
@@ -575,5 +575,5 @@ def burn_captions(clip: dict, transcript: dict, input_path: str,
          *encoder_video_opts("export"),
          *encoder_audio_opts(),
          output_path],
-        check=True, capture_output=True,
+        check=True, capture_output=True, timeout=600,
     )
