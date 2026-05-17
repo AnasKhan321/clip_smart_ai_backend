@@ -363,19 +363,11 @@ def render_and_caption_clip(
     if end <= start:
         return {"final_clip_path": None, "error": f"invalid range: {start}-{end}"}
 
-    # FAST PATH: native aspect (16:9), no captions, no focus crop → stream-copy.
-    # No pixel filter required, so we skip libx264 entirely. 1hr+ source, 60s
-    # clip = sub-second extract on Railway shared CPU instead of 3–5 min.
-    if (
-        aspect_ratio in ("16:9", "native")
-        and not include_captions
-        and focus_mode in (None, "none")
-    ):
-        rc, err = _stream_copy_cut(source, start, end - start, final_path)
-        if rc == 0 and Path(final_path).exists() and Path(final_path).stat().st_size > 1024:
-            return {"final_clip_path": final_path, "error": None}
-        # If stream-copy failed (non-keyframe-aligned, weird codec), fall through
-        # to the normal re-encode path below.
+    # NOTE: removed stream-copy fast path. -ss before -i jumps to the
+    # nearest preceding keyframe, which often produces an mp4 that opens
+    # mid-GOP — file size looks fine but the video is unplayable until
+    # the next keyframe. Re-encoding (below) is the safe path; the
+    # `effective_profile` switch later still makes 16:9 fast.
 
     # Probe source dims if not supplied (Phase E2: pipeline caches and passes)
     src_w = src_h = None
