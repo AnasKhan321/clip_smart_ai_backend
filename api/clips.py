@@ -222,8 +222,12 @@ def export_clip_endpoint(
     options = {
         "aspect_ratio": body.aspect_ratio,
         "caption_style": body.caption_style,
+        "caption_position": body.caption_position,
         "include_captions": body.include_captions,
         "focus_mode": body.focus_mode,
+        "hook_text": body.hook_text,
+        "hook_position": body.hook_position,
+        "hook_font_scale": body.hook_font_scale,
     }
     job_id = clip.job_id
 

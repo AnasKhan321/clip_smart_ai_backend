@@ -175,13 +175,22 @@ def _format_ass_time(seconds: float) -> str:
 
 
 def _generate_ass(words: list, font: str, complex_script: bool = False,
-                  style: str = "word_highlight") -> str:
+                  style: str = "word_highlight",
+                  position: str = "bottom") -> str:
     from services.caption_styles import get_style, COMPLEX_SAFE_ANIMATIONS
 
-    cfg = get_style(style)
+    cfg = dict(get_style(style))
     animation = cfg["animation"]
     if complex_script and animation not in COMPLEX_SAFE_ANIMATIONS:
         animation = "sentence"
+
+    pos = (position or "bottom").lower()
+    if pos == "top":
+        cfg["alignment"] = 8
+        cfg["margin_v"] = 160
+    elif pos in ("middle", "center"):
+        cfg["alignment"] = 5
+        cfg["margin_v"] = 0
 
     header = f"""[Script Info]
 ScriptType: v4.00+
@@ -339,6 +348,7 @@ def render_and_caption_clip(
     aspect_ratio: str = "9:16",
     focus_mode: str = "none",
     caption_style: str = "word_highlight",
+    caption_position: str = "bottom",
     include_captions: bool = True,
     transcript: Optional[dict] = None,
     source_dims: Optional[tuple] = None,
@@ -431,7 +441,8 @@ def render_and_caption_clip(
             complex_script = language in _COMPLEX_SCRIPT_LANGS
             ass_path = str(clips_dir / f"clip_{rank:03d}.ass")
             ass_content = _generate_ass(
-                clip_words, font, complex_script=complex_script, style=caption_style
+                clip_words, font, complex_script=complex_script,
+                style=caption_style, position=caption_position,
             )
             with open(ass_path, "w", encoding="utf-8") as f:
                 f.write(ass_content)

@@ -59,6 +59,10 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     include_captions = options.get("include_captions", True)
     caption_style = options.get("caption_style", "word_highlight")
     focus_mode = options.get("focus_mode", "none")
+    caption_position = options.get("caption_position", "bottom")
+    hook_text = (options.get("hook_text") or "").strip()
+    hook_position = options.get("hook_position", "top")
+    hook_font_scale = float(options.get("hook_font_scale", 1.0))
     # Focus modes (face/speaker) only make sense when re-framing to vertical.
     # For 16:9 / 1:1 they'd run heavy track computation (face detection on
     # the entire source) for no benefit — the filter chain ignores them.
@@ -102,6 +106,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         aspect_ratio=aspect_ratio,
         focus_mode=focus_mode,
         caption_style=caption_style,
+        caption_position=caption_position,
         include_captions=include_captions and transcript is not None,
         transcript=transcript,
         profile=render_profile,
@@ -109,7 +114,22 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     if result["error"]:
         raise RuntimeError(f"Export render failed: {result['error']}")
 
-    shutil.copy(result["final_clip_path"], export_path)
+    source_for_copy = result["final_clip_path"]
+    if hook_text:
+        from services.hook_overlay import add_hook_to_video
+        hooked_path = str(Path(source_for_copy).with_name(
+            Path(source_for_copy).stem + "_hook.mp4"
+        ))
+        try:
+            add_hook_to_video(
+                source_for_copy, hook_text, hooked_path,
+                position=hook_position, font_scale=hook_font_scale,
+            )
+            source_for_copy = hooked_path
+        except Exception as exc:
+            logger.warning("hook overlay failed for clip %s: %s", clip.get("rank"), exc)
+
+    shutil.copy(source_for_copy, export_path)
 
     if not Path(export_path).exists() or Path(export_path).stat().st_size < 1024:
         raise RuntimeError(f"Export produced empty or missing file: {export_path}")

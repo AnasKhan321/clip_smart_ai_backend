@@ -70,6 +70,10 @@ class ExportRequest(BaseModel):
     aspect_ratio: str = "9:16"
     caption_style: str = "word_highlight"
     caption_language: Optional[str] = None
+    caption_position: str = "bottom"  # top | middle | bottom
     include_captions: bool = True
     output_format: str = "mp4"
     focus_mode: str = "none"  # none | speaker | center | face
+    hook_text: Optional[str] = None
+    hook_position: str = "top"  # top | center | bottom
+    hook_font_scale: float = 1.0
