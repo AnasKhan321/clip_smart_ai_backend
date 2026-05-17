@@ -181,6 +181,24 @@ def _rerender_clip(clip: Clip, db: Session):
     db.commit()
 
 
+@router.post("/clips/{clip_id}/hook-suggestions")
+def hook_suggestions_endpoint(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Generate ~4 viral hook text suggestions for a clip via a cheap LLM."""
+    clip = _owned_clip(clip_id, db, user)
+    from services.hook_generator import generate_hooks
+    excerpt = clip.transcript_excerpt or ""
+    try:
+        suggestions = generate_hooks(excerpt, existing_hook=clip.hook_line)
+    except Exception as exc:
+        logger.exception("hook suggestions failed for clip %s", clip_id)
+        raise HTTPException(status_code=502, detail=str(exc)[:200])
+    return {"suggestions": suggestions}
+
+
 @router.post("/clips/{clip_id}/export")
 def export_clip_endpoint(
     clip_id: str,
@@ -228,6 +246,7 @@ def export_clip_endpoint(
         "hook_text": body.hook_text,
         "hook_position": body.hook_position,
         "hook_font_scale": body.hook_font_scale,
+        "hook_style": body.hook_style,
     }
     job_id = clip.job_id
 

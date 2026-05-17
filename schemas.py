@@ -77,3 +77,4 @@ class ExportRequest(BaseModel):
     hook_text: Optional[str] = None
     hook_position: str = "top"  # top | center | bottom
     hook_font_scale: float = 1.0
+    hook_style: str = "serif_white"
