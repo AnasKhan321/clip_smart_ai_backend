@@ -132,6 +132,14 @@ def _rerender_clip(clip: Clip, db: Session):
     source_dims = (job.source_width, job.source_height) \
         if (job and job.source_width and job.source_height) else None
 
+    # Pull source from R2 if worker disk was wiped — same reason as exporter.
+    try:
+        from services.exporter import _ensure_local_source
+        _ensure_local_source(clip.job_id)
+    except Exception as exc:
+        logger.warning("source restore for rerender failed (%s): %s",
+                       clip.job_id, exc)
+
     try:
         transcript = load_transcript(clip.job_id)
     except FileNotFoundError:
