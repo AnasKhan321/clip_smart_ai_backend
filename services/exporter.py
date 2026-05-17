@@ -59,6 +59,11 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     include_captions = options.get("include_captions", True)
     caption_style = options.get("caption_style", "word_highlight")
     focus_mode = options.get("focus_mode", "none")
+    # Focus modes (face/speaker) only make sense when re-framing to vertical.
+    # For 16:9 / 1:1 they'd run heavy track computation (face detection on
+    # the entire source) for no benefit — the filter chain ignores them.
+    if aspect_ratio != "9:16" and focus_mode in ("face", "speaker"):
+        focus_mode = "none"
 
     # Restore source from R2 if worker disk was wiped — must happen before
     # face/speaker track computation (those also read the source video).
