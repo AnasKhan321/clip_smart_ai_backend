@@ -8,7 +8,7 @@ import math
 import os
 import subprocess
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from services.media_tools import ffmpeg_path, ffprobe_path
 
 _SAMPLE_FPS = 2.0
@@ -25,9 +25,13 @@ def focus_track_path(job_id: str) -> Path:
     return Path(storage) / "jobs" / job_id / "focus_track.json"
 
 
-def face_track_path(job_id: str) -> Path:
+def face_track_path(job_id: str, clip_range: Optional[Tuple[float, float]] = None) -> Path:
     storage = os.getenv("STORAGE_PATH", "./storage")
-    return Path(storage) / "jobs" / job_id / "face_track.json"
+    base = Path(storage) / "jobs" / job_id
+    if clip_range is not None:
+        s, e = clip_range
+        return base / f"face_track_{int(round(s))}_{int(round(e))}.json"
+    return base / "face_track.json"
 
 
 def load_focus_track(job_id: str) -> Optional[List[dict]]:
@@ -38,8 +42,9 @@ def load_focus_track(job_id: str) -> Optional[List[dict]]:
         return json.load(f)
 
 
-def load_face_track(job_id: str) -> Optional[List[dict]]:
-    p = face_track_path(job_id)
+def load_face_track(job_id: str,
+                    clip_range: Optional[Tuple[float, float]] = None) -> Optional[List[dict]]:
+    p = face_track_path(job_id, clip_range)
     if not p.exists():
         return None
     with open(p) as f:
@@ -583,15 +588,21 @@ def _detect_scenes(source: str, duration: float) -> List[float]:
         return []
 
 
-def compute_face_track(job_id: str, progress_callback=None) -> List[dict]:
+def compute_face_track(job_id: str, progress_callback=None,
+                       clip_range: Optional[Tuple[float, float]] = None) -> List[dict]:
     """Sample at 10 FPS, MediaPipe detect biggest face per frame, smooth w/
     One Euro, reset at scene cuts. Persist to face_track.json.
 
     Track entry: {t, cx, cy, fh, scene}. cx/cy = eye-midpoint (or bbox center
     fallback) normalized to source dims. fh = face bbox height normalized.
-    scene = integer scene index for cut-aware rendering.
+    scene = integer scene index for cut-aware rendering. `t` is always absolute
+    (offset from source start, in seconds) so existing slice_face_track works.
+
+    When `clip_range=(start, end)` is provided, only that window of the source
+    is processed. Cache file is keyed per-range. This is the Railway path —
+    avoids running detection on the entire source for a 30s clip.
     """
-    existing = load_face_track(job_id)
+    existing = load_face_track(job_id, clip_range)
     if existing:
         if progress_callback:
             progress_callback(100)
@@ -605,35 +616,52 @@ def compute_face_track(job_id: str, progress_callback=None) -> List[dict]:
     try:
         import cv2
     except ImportError:
-        _save_face_track(job_id, [])
+        _save_face_track(job_id, [], clip_range)
         return []
 
     src_w, src_h, duration = _probe_video(str(source))
     if duration <= 0:
-        _save_face_track(job_id, [])
+        _save_face_track(job_id, [], clip_range)
         return []
 
-    # Scene cuts (best-effort)
-    cuts = _detect_scenes(str(source), duration)
+    # Bounded window. Clamp to source duration.
+    if clip_range is not None:
+        win_start = max(0.0, float(clip_range[0]))
+        win_end = min(float(duration), float(clip_range[1]))
+        if win_end <= win_start:
+            _save_face_track(job_id, [], clip_range)
+            return []
+    else:
+        win_start, win_end = 0.0, float(duration)
+    win_dur = win_end - win_start
 
-    # Extract dense sampled frames at lower res for speed.
-    frames_dir = Path(storage) / "jobs" / job_id / "_face_frames"
+    # Scene cuts: only those inside the window, shifted nowhere (kept absolute).
+    all_cuts = _detect_scenes(str(source), duration)
+    cuts = [c for c in all_cuts if win_start < c < win_end]
+
+    # Extract dense sampled frames at lower res for speed. -ss BEFORE -i for
+    # fast seek (keyframe-accurate enough for face detection at 10fps).
+    frames_dir_name = "_face_frames" if clip_range is None else (
+        f"_face_frames_{int(round(win_start))}_{int(round(win_end))}"
+    )
+    frames_dir = Path(storage) / "jobs" / job_id / frames_dir_name
     frames_dir.mkdir(parents=True, exist_ok=True)
     pattern = str(frames_dir / "f_%06d.jpg")
     try:
-        subprocess.run(
-            [ffmpeg_path(), "-y", "-i", str(source),
-             "-vf", f"fps={_FACE_SAMPLE_FPS},scale=640:-2",
-             "-q:v", "3", pattern],
-            check=True, capture_output=True,
-        )
+        cmd = [ffmpeg_path(), "-y"]
+        if clip_range is not None:
+            cmd += ["-ss", f"{win_start:.3f}", "-t", f"{win_dur:.3f}"]
+        cmd += ["-i", str(source),
+                "-vf", f"fps={_FACE_SAMPLE_FPS},scale=640:-2",
+                "-q:v", "3", pattern]
+        subprocess.run(cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError:
-        _save_face_track(job_id, [])
+        _save_face_track(job_id, [], clip_range)
         return []
 
     frame_files = sorted(frames_dir.glob("f_*.jpg"))
     if not frame_files:
-        _save_face_track(job_id, [])
+        _save_face_track(job_id, [], clip_range)
         return []
 
     # MediaPipe primary; Haar fallback if mediapipe missing.
@@ -659,7 +687,9 @@ def compute_face_track(job_id: str, progress_callback=None) -> List[dict]:
     raw = []
     last_cx, last_cy, last_fh = 0.5, 0.4, 0.22
     for idx, fpath in enumerate(frame_files):
-        t = idx / _FACE_SAMPLE_FPS
+        # Absolute timestamp (source-relative). Offsets by window start so
+        # slice_face_track (which expects source-absolute t) keeps working.
+        t = win_start + idx / _FACE_SAMPLE_FPS
         img = cv2.imread(str(fpath))
         if img is None:
             continue
@@ -738,7 +768,7 @@ def compute_face_track(job_id: str, progress_callback=None) -> List[dict]:
         pass
 
     smoothed = _smooth_face_track(raw, cuts)
-    _save_face_track(job_id, smoothed)
+    _save_face_track(job_id, smoothed, clip_range)
     if progress_callback:
         progress_callback(100)
     return smoothed
@@ -778,8 +808,9 @@ def _smooth_face_track(raw: List[dict], cuts: List[float]) -> List[dict]:
     return out
 
 
-def _save_face_track(job_id: str, track: List[dict]):
-    p = face_track_path(job_id)
+def _save_face_track(job_id: str, track: List[dict],
+                     clip_range: Optional[Tuple[float, float]] = None):
+    p = face_track_path(job_id, clip_range)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w") as f:
         json.dump(track, f)

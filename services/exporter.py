@@ -75,6 +75,11 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     _ensure_local_source(job_id)
 
     # Compute focus / face track lazily on first export of each mode.
+    # For face mode: process ONLY the clip window, not the whole source.
+    # Massive speedup on long podcasts where user exports a 30s clip.
+    clip_start = clip.get("user_start_seconds") or clip["start_seconds"]
+    clip_end = clip.get("user_end_seconds") or clip["end_seconds"]
+    face_clip_range = (float(clip_start), float(clip_end))
     if focus_mode == "speaker":
         from services.speaker_focus import compute_focus_track
         try:
@@ -84,7 +89,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     elif focus_mode == "face":
         from services.speaker_focus import compute_face_track
         try:
-            compute_face_track(job_id)
+            compute_face_track(job_id, clip_range=face_clip_range)
         except Exception:
             focus_mode = "none"
 
@@ -111,6 +116,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         include_captions=include_captions and transcript is not None,
         transcript=transcript,
         profile=render_profile,
+        face_clip_range=face_clip_range if focus_mode == "face" else None,
     )
     if result["error"]:
         raise RuntimeError(f"Export render failed: {result['error']}")

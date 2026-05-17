@@ -353,6 +353,7 @@ def render_and_caption_clip(
     transcript: Optional[dict] = None,
     source_dims: Optional[tuple] = None,
     profile: str = "preview",
+    face_clip_range: Optional[tuple] = None,
 ) -> dict:
     """One ffmpeg pass: cut → aspect transform → caption burn.
 
@@ -396,7 +397,11 @@ def render_and_caption_clip(
             from services.speaker_focus import (
                 load_face_track, slice_face_track, build_face_crop_expression,
             )
-            track = load_face_track(job_id)
+            track = load_face_track(job_id, clip_range=face_clip_range)
+            # Fallback to full-source track if a per-clip track wasn't computed
+            # (e.g. earlier pipeline path that pre-computed everything).
+            if not track and face_clip_range is not None:
+                track = load_face_track(job_id)
             if track:
                 clip_track = slice_face_track(track, start, end)
                 if clip_track:
