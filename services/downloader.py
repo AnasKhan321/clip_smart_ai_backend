@@ -476,20 +476,48 @@ def _extract_audio(video_path: str, audio_path: str):
         stderr = (e.stderr or "").strip()[-300:]
         raise RuntimeError(f"Audio extraction: ffprobe failed: {stderr}") from e
 
+    # First pass: tolerant decode. `-err_detect ignore_err` skips malformed
+    # AAC packets (e.g. HE-AAC v2 with 8 SBR bands — ffmpeg native decoder
+    # caps at 7 and bails with exit 234). `-fflags +discardcorrupt` drops the
+    # corrupt frames instead of aborting the whole stream.
+    base_cmd = [
+        ffmpeg_path(), "-y",
+        "-err_detect", "ignore_err",
+        "-fflags", "+discardcorrupt",
+        "-i", video_path,
+        "-vn",
+        "-ar", "16000", "-ac", "1", "-f", "wav", audio_path,
+    ]
+    try:
+        subprocess.run(base_cmd, check=True, capture_output=True, timeout=600)
+        return
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("Audio extraction timed out (>10min)")
+    except subprocess.CalledProcessError as e:
+        stderr = (e.stderr or b"").decode("utf-8", errors="ignore").strip()[-500:]
+
+    # Fallback: re-encode through aac_fixed (fixed-point AAC decoder, often
+    # handles HE-AAC streams the LC decoder rejects).
     try:
         subprocess.run(
-            [ffmpeg_path(), "-y", "-i", video_path,
-             "-vn",                  # ignore video stream
+            [ffmpeg_path(), "-y",
+             "-err_detect", "ignore_err",
+             "-fflags", "+discardcorrupt",
+             "-c:a", "aac_fixed",
+             "-i", video_path,
+             "-vn",
              "-ar", "16000", "-ac", "1", "-f", "wav", audio_path],
             check=True, capture_output=True, timeout=600,
         )
-    except subprocess.CalledProcessError as e:
-        stderr = (e.stderr or b"").decode("utf-8", errors="ignore").strip()[-500:]
-        raise RuntimeError(
-            f"Audio extraction failed (ffmpeg exit {e.returncode}): {stderr}"
-        ) from e
+        return
     except subprocess.TimeoutExpired:
         raise RuntimeError("Audio extraction timed out (>10min)")
+    except subprocess.CalledProcessError as e2:
+        stderr2 = (e2.stderr or b"").decode("utf-8", errors="ignore").strip()[-500:]
+        raise RuntimeError(
+            f"Audio extraction failed (ffmpeg exit {e2.returncode}). "
+            f"Primary error: {stderr}. Fallback error: {stderr2}"
+        ) from e2
 
 
 def _get_duration(video_path: str) -> float:
