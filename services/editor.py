@@ -303,6 +303,34 @@ def _group_words(words: list, max_words: int = 4) -> list:
     return groups
 
 
+# ── Stream-copy fast path ───────────────────────────────────────────────────
+
+def _stream_copy_cut(source: str, start: float, duration: float,
+                     output: str) -> tuple[int, str]:
+    """Cut [start, start+duration] from source via `-c copy`. No re-encode.
+
+    Uses -ss before -i for keyframe-aligned input seek (fast). Caller decides
+    whether stream copy is appropriate (no filter, no caption burn).
+    """
+    cmd = [
+        ffmpeg_path(), "-y",
+        "-ss", str(start),
+        "-i", source,
+        "-t", str(duration),
+        "-c", "copy",
+        "-movflags", "+faststart",
+        "-avoid_negative_ts", "make_zero",
+        output,
+    ]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+        return 0, ""
+    except subprocess.TimeoutExpired:
+        return -1, "stream copy timeout"
+    except subprocess.CalledProcessError as e:
+        return e.returncode, (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
+
+
 # ── Single-pass render (the heart) ──────────────────────────────────────────
 
 def render_and_caption_clip(
@@ -334,6 +362,20 @@ def render_and_caption_clip(
     end = clip.get("user_end_seconds") or clip["end_seconds"]
     if end <= start:
         return {"final_clip_path": None, "error": f"invalid range: {start}-{end}"}
+
+    # FAST PATH: native aspect (16:9), no captions, no focus crop → stream-copy.
+    # No pixel filter required, so we skip libx264 entirely. 1hr+ source, 60s
+    # clip = sub-second extract on Railway shared CPU instead of 3–5 min.
+    if (
+        aspect_ratio in ("16:9", "native")
+        and not include_captions
+        and focus_mode in (None, "none")
+    ):
+        rc, err = _stream_copy_cut(source, start, end - start, final_path)
+        if rc == 0 and Path(final_path).exists() and Path(final_path).stat().st_size > 1024:
+            return {"final_clip_path": final_path, "error": None}
+        # If stream-copy failed (non-keyframe-aligned, weird codec), fall through
+        # to the normal re-encode path below.
 
     # Probe source dims if not supplied (Phase E2: pipeline caches and passes)
     src_w = src_h = None
@@ -432,14 +474,21 @@ def render_and_caption_clip(
             stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
             return e.returncode, stderr
 
-    rc, err = _run(encoder_video_opts(profile))
+    # For native 16:9 export the only work is caption burn-in — the scale
+    # filter is a no-op-ish 1080p normalize. Use a faster preset so a 60s
+    # clip doesn't take 5 min on Railway shared CPU.
+    effective_profile = profile
+    if aspect_ratio in ("16:9", "native") and profile == "export":
+        effective_profile = "preview"  # preset=ultrafast, CRF 26 — still clean
+
+    rc, err = _run(encoder_video_opts(effective_profile))
 
     # Hardware encoder can list as available but fail at encode time
     # (NVENC on a CPU-only host, VideoToolbox under a sandboxed container, etc).
     # Fall back to libx264 once and remember the decision for this process.
     if rc != 0 and _is_hwaccel_failure(err):
         _disable_hwaccel_for_process()
-        rc, err = _run(encoder_video_opts(profile))
+        rc, err = _run(encoder_video_opts(effective_profile))
 
     if rc != 0:
         return {"final_clip_path": None, "error": f"ffmpeg failed: {err}"}
