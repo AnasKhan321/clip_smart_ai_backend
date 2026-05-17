@@ -107,6 +107,8 @@ def _run_transcribe(job_id: str, language: str = None) -> dict:
         return _transcribe_openai(job_id, language, None)
     elif p == "groq":
         return _transcribe_groq(job_id, language, None)
+    elif p == "deepgram":
+        return _transcribe_deepgram(job_id, language, None)
     else:
         return _transcribe_local(job_id, language, None)
 
@@ -159,6 +161,8 @@ def transcribe(job_id: str, language: str = None, progress_callback=None) -> dic
         return _transcribe_openai(job_id, language, progress_callback)
     elif p == "groq":
         return _transcribe_groq(job_id, language, progress_callback)
+    elif p == "deepgram":
+        return _transcribe_deepgram(job_id, language, progress_callback)
     else:
         return _transcribe_local(job_id, language, progress_callback)
 
@@ -614,6 +618,242 @@ def _groq_response_to_dict(response) -> dict:
         "language": lang,
         "segments": segments,
     }
+
+
+# ── Deepgram (Nova-3, fast + diarization built in) ──────────────────────────
+
+_DEEPGRAM_URL = "https://api.deepgram.com/v1/listen"
+
+
+def _transcribe_deepgram(job_id: str, language: str = None, progress_callback=None) -> dict:
+    """Transcribe via Deepgram Nova-3.
+
+    Same R2-URL submission trick as AssemblyAI: if the source already lives in
+    R2, hand Deepgram a presigned URL and skip the worker→ffmpeg→upload hop.
+    Falls back to uploading a compact m4a if R2 isn't usable.
+
+    Returns the standard internal shape:
+      {"language": ..., "segments": [{"start","end","text","words":[...]}]}
+    Also writes diarization.json (utterance-level speaker spans).
+    """
+    import httpx
+
+    api_key = os.getenv("DEEPGRAM_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPGRAM_API_KEY is required when TRANSCRIPTION_PROVIDER=deepgram")
+
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    job_dir = Path(storage) / "jobs" / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = job_dir / "transcript.json"
+    diarization_path = job_dir / "diarization.json"
+
+    # Prefer R2 URL submission.
+    upload_url = None
+    try:
+        from services import r2 as _r2
+        if _r2.is_enabled():
+            r2_key = _r2.source_key(job_id)
+            if _r2.object_exists(r2_key):
+                upload_url = _r2.object_url(r2_key, ttl=7200)
+    except Exception as exc:
+        print(f"[transcriber-deepgram] r2 url lookup failed ({exc})", flush=True)
+
+    params = {
+        "model": "nova-3",
+        "smart_format": "true",
+        "punctuate": "true",
+        "diarize": "true",
+        "utterances": "true",
+        "paragraphs": "false",
+    }
+    # Nova-3 supports auto-detect via language=multi for multilingual content,
+    # or a specific BCP-47 code (e.g. "en", "hi") when the caller knows.
+    params["language"] = language or os.getenv("DEEPGRAM_LANGUAGE", "multi")
+
+    if progress_callback:
+        progress_callback(10)
+
+    headers = {"Authorization": f"Token {api_key}"}
+
+    with httpx.Client(timeout=900.0) as client:
+        if upload_url:
+            # Submit JSON body with audio URL. Deepgram fetches from R2 itself.
+            headers["Content-Type"] = "application/json"
+            resp = client.post(
+                _DEEPGRAM_URL,
+                params=params,
+                headers=headers,
+                json={"url": upload_url},
+            )
+        else:
+            # Local upload fallback: build a compact m4a (mono 16kHz) and stream
+            # the bytes directly as request body.
+            source_path = _find_source_media(job_dir)
+            upload_path = source_path
+            if source_path.suffix.lower() in (".mp4", ".mkv", ".webm"):
+                upload_path = _extract_compact_audio(source_path, job_dir) or source_path
+            headers["Content-Type"] = "audio/m4a" if upload_path.suffix.lower() == ".m4a" else "audio/wav"
+            with open(upload_path, "rb") as f:
+                resp = client.post(
+                    _DEEPGRAM_URL,
+                    params=params,
+                    headers=headers,
+                    content=f.read(),
+                )
+
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Deepgram error {resp.status_code}: {resp.text[:500]}"
+        )
+
+    if progress_callback:
+        progress_callback(80)
+
+    payload = resp.json()
+    result = _deepgram_payload_to_transcript(payload)
+
+    with open(transcript_path, "w", encoding="utf-8") as f:
+        json.dump(result, f, ensure_ascii=False, indent=2)
+
+    diarization = _deepgram_payload_to_diarization(payload)
+    with open(diarization_path, "w") as f:
+        json.dump(diarization, f, indent=2)
+
+    _mirror_artifact_to_r2(job_id, "transcript.json")
+    _mirror_artifact_to_r2(job_id, "diarization.json")
+
+    if progress_callback:
+        progress_callback(100)
+
+    return result
+
+
+def _find_source_media(job_dir: Path) -> Path:
+    cand = job_dir / "original.mp4"
+    if cand.exists():
+        return cand
+    for ext in ("mkv", "webm", "m4a"):
+        c = job_dir / f"original.{ext}"
+        if c.exists():
+            return c
+    audio = job_dir / "audio.wav"
+    if audio.exists():
+        return audio
+    raise FileNotFoundError(f"No source media for transcription in {job_dir}")
+
+
+def _extract_compact_audio(source_path: Path, job_dir: Path) -> Path:
+    """ffmpeg → mono 16kHz 32kbps AAC m4a. Returns None on failure."""
+    import subprocess as _sp
+    from services.media_tools import ffmpeg_path as _ffmpeg
+    out = job_dir / "upload_audio.m4a"
+    try:
+        _sp.run(
+            [_ffmpeg(), "-y", "-i", str(source_path), "-vn",
+             "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a", "32k",
+             str(out)],
+            check=True, capture_output=True, timeout=600,
+        )
+        if out.exists() and out.stat().st_size > 1024:
+            return out
+    except Exception as exc:
+        print(f"[transcriber] compact audio extract failed ({exc})", flush=True)
+    return None
+
+
+def _deepgram_payload_to_transcript(payload: dict) -> dict:
+    """Convert Deepgram response → internal {language, segments[]} shape."""
+    results = (payload or {}).get("results") or {}
+    channels = results.get("channels") or []
+    alt = (channels[0].get("alternatives") if channels else None) or [{}]
+    alt0 = alt[0] if alt else {}
+
+    detected_lang = (
+        alt0.get("detected_language")
+        or (channels[0].get("detected_language") if channels else None)
+        or "unknown"
+    )
+
+    utterances = results.get("utterances") or []
+    segments = []
+
+    if utterances:
+        for utt in utterances:
+            seg_words = [
+                {
+                    "word": w.get("punctuated_word") or w.get("word") or "",
+                    "start": float(w.get("start", 0)),
+                    "end": float(w.get("end", 0)),
+                    "probability": float(w.get("confidence", 1.0)),
+                }
+                for w in (utt.get("words") or [])
+            ]
+            segments.append({
+                "start": float(utt.get("start", 0)),
+                "end": float(utt.get("end", 0)),
+                "text": (utt.get("transcript") or "").strip(),
+                "words": seg_words,
+            })
+    else:
+        # Fallback: bucket raw words by 10s windows when no utterances.
+        raw_words = alt0.get("words") or []
+        current = None
+        for w in raw_words:
+            ws = float(w.get("start", 0))
+            we = float(w.get("end", 0))
+            wtext = w.get("punctuated_word") or w.get("word") or ""
+            if current is None or ws - current["start"] > 10:
+                current = {"start": ws, "end": we, "text": "", "words": []}
+                segments.append(current)
+            current["end"] = we
+            current["text"] = (current["text"] + " " + wtext).strip()
+            current["words"].append({
+                "word": wtext, "start": ws, "end": we,
+                "probability": float(w.get("confidence", 1.0)),
+            })
+
+    return {"language": detected_lang, "segments": segments}
+
+
+def _deepgram_payload_to_diarization(payload: dict) -> list:
+    """Build [{speaker, start, end}] from utterances (or word-level speaker IDs)."""
+    results = (payload or {}).get("results") or {}
+    utterances = results.get("utterances") or []
+    out = []
+    if utterances:
+        for utt in utterances:
+            speaker_id = utt.get("speaker")
+            if speaker_id is None:
+                continue
+            out.append({
+                "speaker": f"SPEAKER_{int(speaker_id):02d}",
+                "start": round(float(utt.get("start", 0)), 3),
+                "end": round(float(utt.get("end", 0)), 3),
+            })
+        return out
+
+    # Fallback: scan word-level speaker IDs and merge contiguous spans.
+    channels = results.get("channels") or []
+    alt = (channels[0].get("alternatives") if channels else None) or [{}]
+    words = (alt[0].get("words") if alt else None) or []
+    cur = None
+    for w in words:
+        sp = w.get("speaker")
+        if sp is None:
+            continue
+        ws = float(w.get("start", 0))
+        we = float(w.get("end", 0))
+        if cur is None or cur["_sp"] != sp:
+            if cur is not None:
+                out.append({k: v for k, v in cur.items() if not k.startswith("_")})
+            cur = {"speaker": f"SPEAKER_{int(sp):02d}", "start": round(ws, 3),
+                   "end": round(we, 3), "_sp": sp}
+        else:
+            cur["end"] = round(we, 3)
+    if cur is not None:
+        out.append({k: v for k, v in cur.items() if not k.startswith("_")})
+    return out
 
 
 # ── AssemblyAI ───────────────────────────────────────────────────────────────
