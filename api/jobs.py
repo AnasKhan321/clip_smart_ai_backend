@@ -36,12 +36,20 @@ def _validate_r2_source(key: str) -> None:
     url = r2.object_url(key, ttl=1800)
     try:
         proc = _sp.run(
-            [ffprobe_path(), "-v", "error", "-print_format", "json",
+            [ffprobe_path(),
+             "-v", "error",
+             "-rw_timeout", "30000000",      # 30s per network read
+             "-analyzeduration", "10000000", # 10s of stream
+             "-probesize", "10000000",       # 10 MB max probed
+             "-print_format", "json",
              "-show_streams", "-show_format", url],
-            capture_output=True, timeout=60, check=False,
+            capture_output=True, timeout=180, check=False,
         )
     except _sp.TimeoutExpired:
-        raise _SourceInvalid("Source file unreadable (ffprobe timeout).")
+        # Network slow / file huge — fail open (let pipeline try) rather
+        # than block a possibly-fine upload.
+        logger.warning("[validate] ffprobe timeout for %s — skipping validation", key)
+        return
 
     if proc.returncode != 0:
         raise _SourceInvalid(
