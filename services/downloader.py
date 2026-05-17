@@ -410,8 +410,10 @@ def _has_audio_stream(video_path: str) -> bool:
 
 def _needs_wav_extraction() -> bool:
     provider = os.getenv("TRANSCRIPTION_PROVIDER", "local").lower()
-    # AssemblyAI ingests source video directly. Everything else needs a WAV.
-    return provider != "assemblyai"
+    # Cloud providers ingest the source video directly (R2 URL or upload) —
+    # no need to materialize audio.wav locally. Local Whisper + local pyannote
+    # are the only consumers that actually read audio.wav from disk.
+    return provider not in ("assemblyai", "deepgram", "openai", "groq")
 
 
 def save_uploaded_file(file_bytes: bytes, filename: str, job_id: str) -> dict:
