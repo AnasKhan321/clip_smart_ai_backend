@@ -187,7 +187,29 @@ def export_clip_endpoint(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
+    """Kick off an export and return immediately.
+
+    Old behavior ran ffmpeg synchronously inside the POST handler. On Railway
+    the proxy idles the connection after ~5 min of no HTTP bytes — ffmpeg
+    encodes silently the whole time, so the connection died and uvicorn
+    never even logged the request. Frontend saw a generic failure.
+
+    Now: spawn a background thread, mark clip.status="exporting", return
+    202 with the download URL. Frontend polls `/api/clips/{id}` until
+    status hits "exported" (or "failed"), then enables download.
+    """
     clip = _owned_clip(clip_id, db, user)
+
+    # Refuse to double-dispatch — frontend may re-fire on resubmit.
+    if clip.status == "exporting":
+        return {
+            "status": "exporting",
+            "download_url": f"/api/clips/{clip_id}/download",
+            "message": "Export already in progress.",
+        }
+
+    logger.info("export dispatch: clip=%s aspect=%s captions=%s focus=%s",
+                clip_id, body.aspect_ratio, body.include_captions, body.focus_mode)
 
     clip_dict = {
         "rank": clip.rank,
@@ -196,23 +218,68 @@ def export_clip_endpoint(
         "user_start_seconds": clip.user_start_seconds,
         "user_end_seconds": clip.user_end_seconds,
     }
+    options = {
+        "aspect_ratio": body.aspect_ratio,
+        "caption_style": body.caption_style,
+        "include_captions": body.include_captions,
+        "focus_mode": body.focus_mode,
+    }
+    job_id = clip.job_id
 
-    try:
-        export_path = export_clip(
-            clip.job_id,
-            clip_dict,
-            {
-                "aspect_ratio": body.aspect_ratio,
-                "caption_style": body.caption_style,
-                "include_captions": body.include_captions,
-                "focus_mode": body.focus_mode,
-            },
-        )
-        clip.status = "exported"
-        db.commit()
-        return {"export_path": export_path, "download_url": f"/api/clips/{clip_id}/download"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    clip.status = "exporting"
+    clip.error_message = None
+    db.commit()
+
+    _spawn_export_background(clip_id, job_id, clip_dict, options)
+
+    return {
+        "status": "exporting",
+        "download_url": f"/api/clips/{clip_id}/download",
+    }
+
+
+def _spawn_export_background(clip_id: str, job_id: str,
+                             clip_dict: dict, options: dict) -> None:
+    """Run export in a daemon thread with a fresh DB session."""
+    import threading
+    from database import SessionLocal
+
+    def _run():
+        s = SessionLocal()
+        try:
+            try:
+                export_path = export_clip(job_id, clip_dict, options)
+            except Exception as exc:
+                logger.exception("export thread failed for clip %s", clip_id)
+                row = s.query(Clip).filter(Clip.id == clip_id).first()
+                if row is not None:
+                    row.status = "failed"
+                    row.error_message = str(exc)[:500]
+                    s.commit()
+                return
+
+            row = s.query(Clip).filter(Clip.id == clip_id).first()
+            if row is None:
+                return
+            row.status = "exported"
+            row.final_clip_path = export_path
+            row.error_message = None
+            if r2.is_enabled():
+                key = f"jobs/{job_id}/clips/clip_{row.rank:03d}_export.mp4"
+                row.r2_clip_key = key
+                # upload_in_background already runs in its own thread
+                r2.upload_in_background(export_path, key)
+            s.commit()
+            logger.info("export done: clip=%s path=%s", clip_id, export_path)
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run, daemon=True,
+                         name=f"export-{clip_id[:8]}")
+    t.start()
 
 
 @router.get("/clips/{clip_id}/stream-url")
