@@ -17,6 +17,7 @@ _DEFAULT_ORIGINS = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
     "https://clip-smart-ai-frontend-kappa.vercel.app",
+    "https://clipforge-frontend-nu.vercel.app",
 ]
 _env_origins = os.getenv("CORS_ORIGINS", "")
 CORS_ORIGINS = [o.strip() for o in _env_origins.split(",") if o.strip()] or _DEFAULT_ORIGINS
