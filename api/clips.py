@@ -412,7 +412,10 @@ def download_clip(
     if clip.r2_clip_key and r2.is_enabled():
         try:
             if r2.object_exists(clip.r2_clip_key):
-                return {"url": r2.object_url(clip.r2_clip_key, ttl=7200)}
+                fname = f"clip_{clip.rank:03d}.mp4"
+                return {"url": r2.object_url(
+                    clip.r2_clip_key, ttl=7200, download_filename=fname,
+                )}
             else:
                 # Self-heal: background upload must have failed permanently.
                 # Clear the stale key so future requests skip the R2 check

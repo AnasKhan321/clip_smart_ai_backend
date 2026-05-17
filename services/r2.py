@@ -28,7 +28,7 @@ import time
 import threading
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import boto3
 from botocore.client import Config
@@ -143,14 +143,26 @@ def presign_put(key: str, content_type: str = "application/octet-stream",
 
 # ── Public / signed read URL ────────────────────────────────────────────────
 
-def object_url(key: str, ttl: Optional[int] = None) -> str:
-    """Public URL via R2_PUBLIC_URL if set, else signed URL."""
+def object_url(key: str, ttl: Optional[int] = None,
+               download_filename: Optional[str] = None) -> str:
+    """Public URL via R2_PUBLIC_URL if set, else signed URL.
+
+    download_filename: when set, presigned URL includes
+    Content-Disposition=attachment so browser saves the file instead of
+    rendering it inline. Ignored on the R2_PUBLIC_URL path (public custom
+    domain serves whatever the bucket has, no per-request overrides).
+    """
     pub = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
-    if pub:
+    if pub and not download_filename:
         return f"{pub}/{key}"
+    params = {"Bucket": bucket(), "Key": key}
+    if download_filename:
+        # Quote-escape any quotes in filename to keep header well-formed.
+        safe = download_filename.replace('"', '')
+        params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
     return get_client().generate_presigned_url(
         "get_object",
-        Params={"Bucket": bucket(), "Key": key},
+        Params=params,
         ExpiresIn=ttl or int(os.getenv("R2_SIGNED_URL_TTL", "3600")),
     )
 

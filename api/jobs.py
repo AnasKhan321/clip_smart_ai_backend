@@ -39,28 +39,33 @@ def _validate_r2_source(key: str) -> None:
             [ffprobe_path(),
              "-v", "error",
              "-rw_timeout", "30000000",      # 30s per network read
-             "-analyzeduration", "10000000", # 10s of stream
-             "-probesize", "10000000",       # 10 MB max probed
+             "-analyzeduration", "20000000", # 20s of stream
+             "-probesize", "50000000",       # 50 MB probed (catches non-faststart moov)
              "-print_format", "json",
              "-show_streams", "-show_format", url],
             capture_output=True, timeout=180, check=False,
         )
     except _sp.TimeoutExpired:
-        # Network slow / file huge — fail open (let pipeline try) rather
-        # than block a possibly-fine upload.
         logger.warning("[validate] ffprobe timeout for %s — skipping validation", key)
         return
 
-    if proc.returncode != 0:
-        raise _SourceInvalid(
-            "Source file is corrupt or not a supported video format. "
-            "Re-encode with ffmpeg and retry."
-        )
-
+    # Trust JSON output over exit code: ffprobe can exit non-zero on benign
+    # read warnings while still emitting full stream metadata. Only fail if
+    # we got nothing parseable AND ffprobe returned an error.
     try:
         meta = _json.loads(proc.stdout or "{}")
     except _json.JSONDecodeError:
-        raise _SourceInvalid("Source file is corrupt (probe returned no metadata).")
+        meta = {}
+
+    if not meta.get("streams"):
+        if proc.returncode != 0:
+            raise _SourceInvalid(
+                "Source file is corrupt or not a supported video format. "
+                "Re-encode with ffmpeg and retry."
+            )
+        # No streams + zero exit = exotic format; let pipeline try.
+        logger.warning("[validate] no streams parsed for %s — skipping validation", key)
+        return
 
     streams = meta.get("streams") or []
     audio = [s for s in streams if s.get("codec_type") == "audio"]
