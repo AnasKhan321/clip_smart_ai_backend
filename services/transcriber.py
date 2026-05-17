@@ -769,9 +769,26 @@ def _deepgram_payload_to_transcript(payload: dict) -> dict:
     alt = (channels[0].get("alternatives") if channels else None) or [{}]
     alt0 = alt[0] if alt else {}
 
+    # Deepgram puts detected language in different places depending on mode +
+    # model. Probe every known location, then fall back to the env hint.
+    ch0 = channels[0] if channels else {}
+    metadata = (payload or {}).get("metadata") or {}
+    languages_list = ch0.get("languages") or alt0.get("languages") or []
+    first_lang_in_list = None
+    if languages_list:
+        first = languages_list[0]
+        if isinstance(first, dict):
+            first_lang_in_list = first.get("language") or first.get("code")
+        elif isinstance(first, str):
+            first_lang_in_list = first
+
     detected_lang = (
-        alt0.get("detected_language")
-        or (channels[0].get("detected_language") if channels else None)
+        ch0.get("detected_language")
+        or alt0.get("detected_language")
+        or metadata.get("detected_language")
+        or results.get("detected_language")
+        or first_lang_in_list
+        or os.getenv("DEEPGRAM_LANGUAGE")
         or "unknown"
     )
 
