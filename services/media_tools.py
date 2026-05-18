@@ -170,11 +170,19 @@ def encoder_video_opts(profile: str = "preview") -> list[str]:
         threads = os.getenv("FFMPEG_THREADS", "0")  # 0 = use all available
         return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-tune", "film",
                 "-pix_fmt", "yuv420p", "-threads", threads]
-    crf = "20" if profile == "export" else "26"
-    preset = "medium" if profile == "export" else "ultrafast"
-    threads = os.getenv("FFMPEG_THREADS", "2")
-    return ["-c:v", "libx264", "-crf", crf, "-preset", preset, "-pix_fmt", "yuv420p",
-            "-threads", threads]
+    if profile == "export":
+        # Railway shared-vCPU: preset=medium + CRF 20 caused 10-min timeouts
+        # on clips with complex filter chains (9:16 blur+overlay). Use
+        # preset=faster + CRF 22 — 3-4x faster encode, visually identical on
+        # 1080p short-form. Override with FFMPEG_EXPORT_PRESET / FFMPEG_EXPORT_CRF.
+        preset = os.getenv("FFMPEG_EXPORT_PRESET", "faster")
+        crf = os.getenv("FFMPEG_EXPORT_CRF", "22")
+        threads = os.getenv("FFMPEG_THREADS", "0")  # 0 = use all available
+        return ["-c:v", "libx264", "-crf", crf, "-preset", preset,
+                "-pix_fmt", "yuv420p", "-threads", threads]
+    # preview profile — fast and light
+    return ["-c:v", "libx264", "-crf", "26", "-preset", "ultrafast",
+            "-pix_fmt", "yuv420p", "-threads", os.getenv("FFMPEG_THREADS", "2")]
 
 
 def encoder_audio_opts() -> list[str]:

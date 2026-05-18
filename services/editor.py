@@ -485,6 +485,10 @@ def render_and_caption_clip(
     # Use libass-enabled ffmpeg if captions are baked in
     ff_bin = ffmpeg_path(require_libass=bool(captions_ass_path))
 
+    # Export profiles get a longer timeout — they use heavier encode settings
+    # and complex filter chains (blur+overlay for 9:16). Preview stays at 10min.
+    render_timeout = 1200 if effective_profile in ("export", "face_export") else 600
+
     def _run(video_opts: list[str]) -> tuple[int, str]:
         cmd = [ff_bin, "-y", "-ss", str(start), "-i", source, "-t", str(end - start)]
         if hook_png_path:
@@ -498,10 +502,10 @@ def render_and_caption_clip(
             final_path,
         ]
         try:
-            subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+            subprocess.run(cmd, check=True, capture_output=True, timeout=render_timeout)
             return 0, ""
         except subprocess.TimeoutExpired:
-            return -1, "render timeout (>10min)"
+            return -1, f"render timeout (>{render_timeout // 60}min, profile={effective_profile})"
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
             return e.returncode, stderr
