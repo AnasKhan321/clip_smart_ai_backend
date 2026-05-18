@@ -237,6 +237,67 @@ HOOK_STYLES = {
         "uppercase": True,
         "letter_spacing_px": 1,
     },
+    "claymorphism": {
+        "label": "Clay",
+        "font": FONT_INTER,
+        "bg": (167, 198, 255, 250),  # soft blue pastel
+        "fg": (28, 30, 60, 255),
+        "shadow_offset": (6, 8),
+        "shadow_alpha": 200,
+        "shadow_blur": 0,
+        "corner_radius": 26,
+        "padding_x": 32,
+        "padding_y": 24,
+    },
+    "brutalism_red": {
+        "label": "Brutalist",
+        "font": FONT_ANTON,
+        "bg": (255, 0, 0, 255),
+        "fg": (255, 255, 255, 255),
+        "box_outline": (0, 0, 0, 255),
+        "box_outline_w": 6,
+        "shadow_offset": (14, 14),
+        "shadow_alpha": 255,
+        "shadow_blur": 0,
+        "corner_radius": 0,
+        "padding_x": 32,
+        "padding_y": 18,
+        "uppercase": True,
+        "letter_spacing_px": 3,
+    },
+    "glitch_rgb": {
+        "label": "Glitch",
+        "font": FONT_INTER,
+        "bg": (0, 0, 0, 245),
+        "fg": (255, 255, 255, 255),
+        # Two-layer chromatic aberration: red shifted left, cyan shifted right
+        "glow": [
+            ((255, 0, 60, 230), 0, 4),
+            ((0, 220, 255, 230), 0, 4),
+        ],
+        "corner_radius": 4,
+        "padding_x": 30,
+        "padding_y": 22,
+        "uppercase": True,
+        "letter_spacing_px": 2,
+    },
+    "memphis_pop": {
+        "label": "Memphis",
+        "font": FONT_INTER,
+        "bg": (255, 113, 206, 255),  # hot pink
+        "fg": (28, 30, 60, 255),
+        "box_outline": (134, 204, 202, 255),  # teal accent border
+        "box_outline_w": 4,
+        "shadow_offset": (8, 10),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
+        "corner_radius": 16,
+        "padding_x": 30,
+        "padding_y": 22,
+        "tilt_deg": -3.0,
+        "uppercase": True,
+        "letter_spacing_px": 1,
+    },
 }
 
 
@@ -327,14 +388,31 @@ def create_hook_image(
     tilt_deg = float(cfg.get("tilt_deg", 0.0))
     letter_spacing = int(cfg.get("letter_spacing_px", 0))
 
-    base_font_size = int(target_width * 0.05)
-    font_size = max(12, int(base_font_size * font_scale))
+    # 2x supersample: render everything at double size, downscale at end with
+    # LANCZOS. PIL's default rasterizer is grainy at 1x; supersample → smoother
+    # edges, cleaner strokes, no jaggies on tilted text. ~2x memory, ~4x ops
+    # but render is a one-shot per export (~50ms) so cost negligible.
+    SUPER = 2
+    base_font_size = int(target_width * 0.062)  # bumped from 5% — more readable on phones
+    font_size = max(14, int(base_font_size * font_scale))
+    font_size_ss = font_size * SUPER
     font_path = _font_for_text(cfg.get("font") or FONT_SERIF, text)
-    font = _load_font(font_path, font_size)
+    font = _load_font(font_path, font_size_ss)
+    # Scale ALL pixel measurements by SUPER for the supersampled canvas.
+    padding_x *= SUPER
+    padding_y *= SUPER
+    line_spacing *= SUPER
+    corner_radius *= SUPER
+    text_stroke_w *= SUPER
+    box_outline_w *= SUPER
+    shadow_offset = (shadow_offset[0] * SUPER, shadow_offset[1] * SUPER)
+    shadow_blur *= SUPER
+    letter_spacing *= SUPER
+    target_width_ss = target_width * SUPER
 
     dummy = Image.new("RGBA", (1, 1))
     draw = ImageDraw.Draw(dummy)
-    max_text_width = target_width - (2 * padding_x)
+    max_text_width = target_width_ss - (2 * padding_x)
 
     # Word wrap with letter-spacing awareness
     lines: List[str] = []
@@ -362,7 +440,7 @@ def create_hook_image(
     line_heights: List[int] = []
     for line in lines:
         if not line:
-            line_heights.append(font_size)
+            line_heights.append(font_size_ss)
             continue
         w = _line_text_width(draw, line, font, letter_spacing)
         max_line_w = max(max_line_w, w)
@@ -373,9 +451,9 @@ def create_hook_image(
     glow_pad = max((int(l[1] + l[2]) for l in glow_layers), default=0)
     inner_pad_text = max(text_stroke_w, glow_pad)
 
-    box_w = max(max_line_w + 2 * padding_x, int(target_width * 0.3)) + 2 * inner_pad_text
+    box_w = max(max_line_w + 2 * padding_x, int(target_width_ss * 0.3)) + 2 * inner_pad_text
     if not line_heights:
-        total_text_h = font_size
+        total_text_h = font_size_ss
     else:
         total_text_h = sum(line_heights) + (len(line_heights) - 1) * line_spacing
     box_h = total_text_h + 2 * padding_y + 2 * inner_pad_text
@@ -446,7 +524,7 @@ def create_hook_image(
         y = text_origin_y
         for i, line in enumerate(lines):
             if not line:
-                y += font_size + line_spacing
+                y += font_size_ss + line_spacing
                 continue
             line_w = _line_text_width(ld, line, font, letter_spacing)
             x = margin + (box_w - line_w) // 2
@@ -456,7 +534,7 @@ def create_hook_image(
                 stroke_fill=stroke_color,
                 letter_spacing=letter_spacing,
             )
-            y += (line_heights[i] if i < len(line_heights) else font_size) + line_spacing
+            y += (line_heights[i] if i < len(line_heights) else font_size_ss) + line_spacing
         return layer
 
     for color, blur_r, expand in glow_layers:
@@ -472,7 +550,7 @@ def create_hook_image(
         y = text_origin_y + shadow_offset[1]
         for i, line in enumerate(lines):
             if not line:
-                y += font_size + line_spacing
+                y += font_size_ss + line_spacing
                 continue
             line_w = _line_text_width(sd, line, font, letter_spacing)
             x = margin + (box_w - line_w) // 2 + shadow_offset[0]
@@ -482,7 +560,7 @@ def create_hook_image(
                 stroke_fill=(0, 0, 0, shadow_alpha),
                 letter_spacing=letter_spacing,
             )
-            y += (line_heights[i] if i < len(line_heights) else font_size) + line_spacing
+            y += (line_heights[i] if i < len(line_heights) else font_size_ss) + line_spacing
         if shadow_blur > 0:
             sh_layer = sh_layer.filter(ImageFilter.GaussianBlur(shadow_blur))
         img = Image.alpha_composite(img, sh_layer)
@@ -498,6 +576,12 @@ def create_hook_image(
     # left/right the same way user picked in modal).
     if tilt_deg:
         img = img.rotate(-tilt_deg, resample=Image.BICUBIC, expand=True)
+
+    # Downscale supersampled canvas → final size with LANCZOS for smooth AA.
+    if SUPER > 1:
+        new_w = max(1, img.size[0] // SUPER)
+        new_h = max(1, img.size[1] // SUPER)
+        img = img.resize((new_w, new_h), Image.LANCZOS)
 
     img.save(output_path)
     return output_path, img.size[0], img.size[1]
