@@ -281,8 +281,8 @@ def create_hook_image(
         line_heights.append(bb[3] - bb[1])
 
     # Account for stroke / glow padding so glyphs aren't clipped
-    extra = max(text_stroke_w, *(int(l[1] + l[2]) for l in glow_layers) if glow_layers else 0)
-    inner_pad_text = extra
+    glow_pad = max((int(l[1] + l[2]) for l in glow_layers), default=0)
+    inner_pad_text = max(text_stroke_w, glow_pad)
 
     box_w = max(max_line_w + 2 * padding_x, int(target_width * 0.3)) + 2 * inner_pad_text
     if not line_heights:

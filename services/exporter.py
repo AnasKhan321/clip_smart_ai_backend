@@ -1,5 +1,6 @@
 import os
 import shutil
+import subprocess
 import logging
 from pathlib import Path
 
@@ -128,14 +129,24 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
             Path(source_for_copy).stem + "_hook.mp4"
         ))
         try:
+            logger.info("applying hook overlay: clip=%s style=%s pos=%s scale=%s text=%r",
+                        clip.get("rank"), hook_style, hook_position, hook_font_scale, hook_text[:60])
             add_hook_to_video(
                 source_for_copy, hook_text, hooked_path,
                 position=hook_position, font_scale=hook_font_scale,
                 style=hook_style,
             )
+            if not Path(hooked_path).exists() or Path(hooked_path).stat().st_size < 1024:
+                raise RuntimeError(f"hook overlay produced empty file: {hooked_path}")
             source_for_copy = hooked_path
+            logger.info("hook overlay OK: %s", hooked_path)
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or b"").decode(errors="ignore")[-500:]
+            logger.error("hook overlay ffmpeg failed for clip %s: %s", clip.get("rank"), stderr)
+            raise RuntimeError(f"hook overlay failed: {stderr}") from exc
         except Exception as exc:
-            logger.warning("hook overlay failed for clip %s: %s", clip.get("rank"), exc)
+            logger.exception("hook overlay failed for clip %s", clip.get("rank"))
+            raise RuntimeError(f"hook overlay failed: {exc}") from exc
 
     shutil.copy(source_for_copy, export_path)
 
