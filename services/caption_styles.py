@@ -232,12 +232,14 @@ STYLES = {
     },
     "shadow_3d": {
         "label": "3D shadow",
-        "font_size": 92,
+        "font_size": 96,
         "primary": "&H0000FFFF",  # yellow
         "outline_color": "&H00000000",
-        "back_color": "&H00000000",
+        # Shadow color (ASS back_color) = vivid orange. Hard-offset shadow
+        # with no blur → "stacked 3D" feel that matches CSS preview.
+        "back_color": "&H000055D6",  # orange #D65500 (ASS BBGGRR)
         "outline": 0,
-        "shadow": 6,
+        "shadow": 8,
         "bold": 1,
         "alignment": 2,
         "margin_v": 220,
