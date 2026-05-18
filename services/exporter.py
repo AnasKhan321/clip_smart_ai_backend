@@ -63,7 +63,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     hook_text = (options.get("hook_text") or "").strip()
     hook_position = options.get("hook_position", "top")
     hook_font_scale = float(options.get("hook_font_scale", 1.0))
-    hook_style = options.get("hook_style", "serif_white")
+    hook_style = options.get("hook_style", "serif_card")
     # Focus modes (face/speaker) only make sense when re-framing to vertical.
     # For 16:9 / 1:1 they'd run heavy track computation (face detection on
     # the entire source) for no benefit — the filter chain ignores them.

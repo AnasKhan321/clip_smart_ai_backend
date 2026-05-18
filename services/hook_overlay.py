@@ -1,83 +1,162 @@
 """Viral hook text overlay.
 
-Renders white rounded box with black serif text via PIL, then overlays onto
-video as single ffmpeg pass. Adapted from openshorts/hooks.py — dropped the
-runtime urllib font fetch in favor of bundled fonts/NotoSerif-Bold.ttf.
+Renders styled hook text via PIL → overlays onto video via single ffmpeg pass.
+Styles support: custom font, fg/bg colors, box outline, text stroke, drop
+shadow, multi-layer glow, rotation (sticker tilt), uppercase transform,
+letter-spacing.
 """
 import os
 import subprocess
 from pathlib import Path
-from typing import Tuple
+from typing import Tuple, List, Optional
 
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 from services.media_tools import ffmpeg_path, ffprobe_path
 
-FONT_PATH = str(Path(__file__).resolve().parent.parent / "fonts" / "NotoSerif-Bold.ttf")
+FONTS_DIR = Path(__file__).resolve().parent.parent / "fonts"
+FONT_SERIF = str(FONTS_DIR / "NotoSerif-Bold.ttf")
+FONT_INTER = str(FONTS_DIR / "Inter-Black.ttf")
+FONT_ANTON = str(FONTS_DIR / "Anton-Regular.ttf")
 
-# Hook style presets. All use the bundled serif. Differ in bg fill,
-# text color, outline, corner radius, padding, drop shadow.
+
+# Hook style presets. Each preset can specify:
+#   font: ttf path
+#   bg: RGBA fill for box (None = no box)
+#   fg: RGBA text color
+#   box_outline / box_outline_w: solid stroke around box
+#   text_stroke / text_stroke_w: stroke around glyphs
+#   shadow_offset: (dx, dy) opaque drop shadow offset (0,0 disables)
+#   shadow_alpha / shadow_blur: drop shadow look
+#   glow: list of (color, blur_radius, expand) layers — multi-color neon
+#   corner_radius
+#   padding_x / padding_y
+#   tilt_deg: post-render rotation (sticker vibe)
+#   uppercase: force uppercase text
+#   letter_spacing_px: pixel tracking between glyphs
 HOOK_STYLES = {
-    "serif_white": {
+    "serif_card": {
         "label": "Serif card",
+        "font": FONT_SERIF,
         "bg": (255, 255, 255, 240),
+        "fg": (15, 15, 15, 255),
+        "shadow_offset": (6, 10),
+        "shadow_alpha": 140,
+        "shadow_blur": 14,
+        "corner_radius": 22,
+        "padding_x": 32,
+        "padding_y": 26,
+        "tilt_deg": -1.5,
+    },
+    "mrbeast_yellow": {
+        "label": "MrBeast yellow",
+        "font": FONT_INTER,
+        "bg": None,
+        "fg": (255, 220, 0, 255),
+        "text_stroke": (0, 0, 0, 255),
+        "text_stroke_w": 7,
+        "shadow_offset": (5, 5),
+        "shadow_alpha": 220,
+        "shadow_blur": 4,
+        "padding_x": 24,
+        "padding_y": 18,
+        "uppercase": True,
+    },
+    "sticker_pop": {
+        "label": "Sticker pop",
+        "font": FONT_INTER,
+        "bg": (255, 222, 0, 255),
         "fg": (0, 0, 0, 255),
-        "outline": None,
-        "outline_w": 0,
-        "shadow": True,
-        "corner_radius": 20,
+        "box_outline": (0, 0, 0, 255),
+        "box_outline_w": 5,
+        "shadow_offset": (8, 10),
+        "shadow_alpha": 180,
+        "shadow_blur": 6,
+        "corner_radius": 18,
         "padding_x": 30,
-        "padding_y": 25,
+        "padding_y": 22,
+        "tilt_deg": -4.0,
+        "uppercase": True,
     },
-    "black_box": {
-        "label": "Black box",
-        "bg": (0, 0, 0, 235),
+    "neon_glow": {
+        "label": "Neon glow",
+        "font": FONT_INTER,
+        "bg": (10, 10, 20, 230),
         "fg": (255, 255, 255, 255),
-        "outline": None,
-        "outline_w": 0,
-        "shadow": True,
-        "corner_radius": 8,
-        "padding_x": 28,
-        "padding_y": 22,
-    },
-    "sticker_yellow": {
-        "label": "Yellow sticker",
-        "bg": (255, 222, 0, 250),
-        "fg": (0, 0, 0, 255),
-        "outline": (0, 0, 0, 255),
-        "outline_w": 3,
-        "shadow": True,
+        "glow": [
+            ((255, 0, 200, 220), 12, 4),  # magenta wide
+            ((0, 220, 255, 220), 6, 2),   # cyan tight
+        ],
         "corner_radius": 14,
-        "padding_x": 28,
+        "padding_x": 32,
+        "padding_y": 24,
+        "uppercase": True,
+        "letter_spacing_px": 1,
+    },
+    "hot_pink": {
+        "label": "Hot pink",
+        "font": FONT_INTER,
+        "bg": (255, 30, 130, 250),
+        "fg": (255, 255, 255, 255),
+        "shadow_offset": (8, 10),
+        "shadow_alpha": 200,
+        "shadow_blur": 6,
+        "corner_radius": 22,
+        "padding_x": 30,
         "padding_y": 22,
+        "uppercase": True,
+        "letter_spacing_px": 1,
     },
     "breaking_news": {
         "label": "Breaking news",
-        "bg": (210, 30, 30, 245),
+        "font": FONT_INTER,
+        "bg": (210, 25, 25, 250),
         "fg": (255, 255, 255, 255),
-        "outline": None,
-        "outline_w": 0,
-        "shadow": True,
-        "corner_radius": 0,
-        "padding_x": 32,
-        "padding_y": 22,
+        "box_outline": (255, 255, 255, 255),
+        "box_outline_w": 3,
+        "shadow_offset": (6, 8),
+        "shadow_alpha": 200,
+        "shadow_blur": 5,
+        "corner_radius": 4,
+        "padding_x": 34,
+        "padding_y": 20,
+        "uppercase": True,
+        "letter_spacing_px": 2,
     },
-    "outline_only": {
-        "label": "No box",
+    "headline_anton": {
+        "label": "Headline",
+        "font": FONT_ANTON,
         "bg": None,
         "fg": (255, 255, 255, 255),
-        "outline": (0, 0, 0, 255),
-        "outline_w": 4,
-        "shadow": False,
-        "corner_radius": 0,
-        "padding_x": 20,
-        "padding_y": 12,
+        "text_stroke": (0, 0, 0, 255),
+        "text_stroke_w": 8,
+        "shadow_offset": (4, 4),
+        "shadow_alpha": 220,
+        "shadow_blur": 2,
+        "padding_x": 16,
+        "padding_y": 10,
+        "uppercase": True,
+        "letter_spacing_px": 2,
+    },
+    "glass_dark": {
+        "label": "Glass",
+        "font": FONT_INTER,
+        "bg": (30, 30, 35, 180),
+        "fg": (255, 255, 255, 255),
+        "box_outline": (255, 255, 255, 60),
+        "box_outline_w": 2,
+        "shadow_offset": (0, 8),
+        "shadow_alpha": 160,
+        "shadow_blur": 14,
+        "corner_radius": 24,
+        "padding_x": 28,
+        "padding_y": 22,
     },
 }
 
 
 def get_hook_style(style_id: str) -> dict:
-    return HOOK_STYLES.get(style_id, HOOK_STYLES["serif_white"])
+    return HOOK_STYLES.get(style_id, HOOK_STYLES["serif_card"])
 
 
 def _probe_dims(video_path: str) -> Tuple[int, int]:
@@ -90,51 +169,95 @@ def _probe_dims(video_path: str) -> Tuple[int, int]:
     return int(res[0]), int(res[1])
 
 
+def _load_font(path: Optional[str], size: int) -> ImageFont.FreeTypeFont:
+    try:
+        return ImageFont.truetype(path or FONT_SERIF, size)
+    except Exception:
+        try:
+            return ImageFont.truetype(FONT_SERIF, size)
+        except Exception:
+            return ImageFont.load_default()
+
+
+def _line_text_width(draw: ImageDraw.ImageDraw, text: str,
+                     font: ImageFont.FreeTypeFont, letter_spacing: int) -> int:
+    if not text:
+        return 0
+    if letter_spacing <= 0:
+        bb = draw.textbbox((0, 0), text, font=font)
+        return bb[2] - bb[0]
+    total = 0
+    for ch in text:
+        bb = draw.textbbox((0, 0), ch, font=font)
+        total += (bb[2] - bb[0]) + letter_spacing
+    return max(0, total - letter_spacing)
+
+
+def _draw_line_with_spacing(draw: ImageDraw.ImageDraw, xy: Tuple[int, int],
+                            text: str, font: ImageFont.FreeTypeFont,
+                            fill, stroke_width: int = 0, stroke_fill=None,
+                            letter_spacing: int = 0) -> None:
+    if letter_spacing <= 0:
+        draw.text(xy, text, font=font, fill=fill,
+                  stroke_width=stroke_width, stroke_fill=stroke_fill)
+        return
+    x, y = xy
+    for ch in text:
+        draw.text((x, y), ch, font=font, fill=fill,
+                  stroke_width=stroke_width, stroke_fill=stroke_fill)
+        bb = draw.textbbox((0, 0), ch, font=font)
+        x += (bb[2] - bb[0]) + letter_spacing
+
+
 def create_hook_image(
     text: str,
     target_width: int,
     output_path: str,
     font_scale: float = 1.0,
-    style: str = "serif_white",
+    style: str = "serif_card",
 ) -> Tuple[str, int, int]:
     """Render hook PNG with chosen style. Returns (png_path, canvas_w, canvas_h)."""
     cfg = get_hook_style(style)
-    padding_x = cfg["padding_x"]
-    padding_y = cfg["padding_y"]
-    line_spacing = 20
-    corner_radius = cfg["corner_radius"]
-    shadow_enabled = cfg["shadow"]
-    shadow_offset = (5, 5)
-    bg = cfg["bg"]
+
+    if cfg.get("uppercase"):
+        text = text.upper()
+
+    padding_x = int(cfg.get("padding_x", 28))
+    padding_y = int(cfg.get("padding_y", 22))
+    line_spacing = 16
+    corner_radius = int(cfg.get("corner_radius", 0))
+    bg = cfg.get("bg")
     fg = cfg["fg"]
-    text_outline = cfg["outline"] if bg is None else None
-    text_outline_w = cfg["outline_w"] if bg is None else 0
-    box_outline = cfg["outline"] if (bg is not None and cfg["outline"]) else None
-    box_outline_w = cfg["outline_w"] if (bg is not None and cfg["outline"]) else 0
+    text_stroke = cfg.get("text_stroke")
+    text_stroke_w = int(cfg.get("text_stroke_w", 0))
+    box_outline = cfg.get("box_outline")
+    box_outline_w = int(cfg.get("box_outline_w", 0))
+    shadow_offset = cfg.get("shadow_offset", (0, 0))
+    shadow_alpha = int(cfg.get("shadow_alpha", 0))
+    shadow_blur = int(cfg.get("shadow_blur", 0))
+    glow_layers: List = cfg.get("glow", [])
+    tilt_deg = float(cfg.get("tilt_deg", 0.0))
+    letter_spacing = int(cfg.get("letter_spacing_px", 0))
 
     base_font_size = int(target_width * 0.05)
     font_size = max(12, int(base_font_size * font_scale))
-
-    try:
-        font = ImageFont.truetype(FONT_PATH, font_size)
-    except Exception:
-        font = ImageFont.load_default()
+    font = _load_font(cfg.get("font"), font_size)
 
     dummy = Image.new("RGBA", (1, 1))
     draw = ImageDraw.Draw(dummy)
     max_text_width = target_width - (2 * padding_x)
 
-    lines: list[str] = []
+    # Word wrap with letter-spacing awareness
+    lines: List[str] = []
     for paragraph in text.split("\n"):
         if not paragraph.strip():
             lines.append("")
             continue
         words = paragraph.split()
-        current: list[str] = []
+        current: List[str] = []
         for word in words:
             test = " ".join(current + [word])
-            bbox = draw.textbbox((0, 0), test, font=font)
-            if (bbox[2] - bbox[0]) <= max_text_width:
+            if _line_text_width(draw, test, font, letter_spacing) <= max_text_width:
                 current.append(word)
             else:
                 if current:
@@ -147,63 +270,119 @@ def create_hook_image(
             lines.append(" ".join(current))
 
     max_line_w = 0
-    line_heights: list[int] = []
+    line_heights: List[int] = []
     for line in lines:
         if not line:
             line_heights.append(font_size)
             continue
-        bbox = draw.textbbox((0, 0), line, font=font)
-        max_line_w = max(max_line_w, bbox[2] - bbox[0])
-        line_heights.append(bbox[3] - bbox[1])
+        w = _line_text_width(draw, line, font, letter_spacing)
+        max_line_w = max(max_line_w, w)
+        bb = draw.textbbox((0, 0), line, font=font)
+        line_heights.append(bb[3] - bb[1])
 
-    box_w = max(max_line_w + 2 * padding_x, int(target_width * 0.3))
+    # Account for stroke / glow padding so glyphs aren't clipped
+    extra = max(text_stroke_w, *(int(l[1] + l[2]) for l in glow_layers) if glow_layers else 0)
+    inner_pad_text = extra
+
+    box_w = max(max_line_w + 2 * padding_x, int(target_width * 0.3)) + 2 * inner_pad_text
     if not line_heights:
         total_text_h = font_size
     else:
         total_text_h = sum(line_heights) + (len(line_heights) - 1) * line_spacing
-    box_h = total_text_h + 2 * padding_y
+    box_h = total_text_h + 2 * padding_y + 2 * inner_pad_text
 
-    canvas_w = box_w + 40
-    canvas_h = box_h + 40
+    margin = max(40, shadow_blur + abs(shadow_offset[1]) + 10)
+    canvas_w = box_w + 2 * margin
+    canvas_h = box_h + 2 * margin
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
-    if bg is not None and shadow_enabled:
-        shadow_draw = ImageDraw.Draw(img)
-        shadow_box = [
-            (20 + shadow_offset[0], 20 + shadow_offset[1]),
-            (20 + box_w + shadow_offset[0], 20 + box_h + shadow_offset[1]),
+    # Drop shadow (only when there is a solid box; otherwise shadow follows text via stroke)
+    if bg is not None and shadow_alpha > 0 and (shadow_offset[0] or shadow_offset[1] or shadow_blur):
+        shadow_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(shadow_layer)
+        sb = [
+            (margin + shadow_offset[0], margin + shadow_offset[1]),
+            (margin + box_w + shadow_offset[0], margin + box_h + shadow_offset[1]),
         ]
-        shadow_draw.rounded_rectangle(shadow_box, radius=corner_radius, fill=(0, 0, 0, 100))
-        img = img.filter(ImageFilter.GaussianBlur(5))
+        sd.rounded_rectangle(sb, radius=corner_radius, fill=(0, 0, 0, shadow_alpha))
+        if shadow_blur > 0:
+            shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(shadow_blur))
+        img = Image.alpha_composite(img, shadow_layer)
 
-    final_draw = ImageDraw.Draw(img)
+    # Box fill + outline
     if bg is not None:
-        main_box = [(20, 20), (20 + box_w, 20 + box_h)]
-        final_draw.rounded_rectangle(
-            main_box, radius=corner_radius, fill=bg,
-            outline=box_outline, width=box_outline_w if box_outline else 0,
+        box_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        bd = ImageDraw.Draw(box_layer)
+        rect = [(margin, margin), (margin + box_w, margin + box_h)]
+        bd.rounded_rectangle(
+            rect, radius=corner_radius, fill=bg,
+            outline=box_outline if box_outline else None,
+            width=box_outline_w if box_outline else 0,
         )
+        img = Image.alpha_composite(img, box_layer)
 
-    current_y = 20 + padding_y - 2
-    for i, line in enumerate(lines):
-        if not line:
-            current_y += font_size + line_spacing
-            continue
-        bbox = final_draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
-        line_h = line_heights[i] if i < len(line_heights) else (bbox[3] - bbox[1])
-        x = 20 + (box_w - line_w) // 2
-        if text_outline and text_outline_w > 0:
-            final_draw.text(
-                (x, current_y), line, font=font, fill=fg,
-                stroke_width=text_outline_w, stroke_fill=text_outline,
+    # Glow layers (render text onto blurred copies, composite under main text)
+    text_origin_y = margin + padding_y + inner_pad_text - 2
+
+    def _render_text_layer(color, stroke_w=0, stroke_color=None) -> Image.Image:
+        layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        ld = ImageDraw.Draw(layer)
+        y = text_origin_y
+        for i, line in enumerate(lines):
+            if not line:
+                y += font_size + line_spacing
+                continue
+            line_w = _line_text_width(ld, line, font, letter_spacing)
+            x = margin + (box_w - line_w) // 2
+            _draw_line_with_spacing(
+                ld, (x, y), line, font, fill=color,
+                stroke_width=stroke_w,
+                stroke_fill=stroke_color,
+                letter_spacing=letter_spacing,
             )
-        else:
-            final_draw.text((x, current_y), line, font=font, fill=fg)
-        current_y += line_h + line_spacing
+            y += (line_heights[i] if i < len(line_heights) else font_size) + line_spacing
+        return layer
+
+    for color, blur_r, expand in glow_layers:
+        g_layer = _render_text_layer(color, stroke_w=int(expand), stroke_color=color)
+        if blur_r > 0:
+            g_layer = g_layer.filter(ImageFilter.GaussianBlur(int(blur_r)))
+        img = Image.alpha_composite(img, g_layer)
+
+    # Drop shadow for stroked text (no box case)
+    if bg is None and shadow_alpha > 0 and (shadow_offset[0] or shadow_offset[1]):
+        sh_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
+        sd = ImageDraw.Draw(sh_layer)
+        y = text_origin_y + shadow_offset[1]
+        for i, line in enumerate(lines):
+            if not line:
+                y += font_size + line_spacing
+                continue
+            line_w = _line_text_width(sd, line, font, letter_spacing)
+            x = margin + (box_w - line_w) // 2 + shadow_offset[0]
+            _draw_line_with_spacing(
+                sd, (x, y), line, font, fill=(0, 0, 0, shadow_alpha),
+                stroke_width=text_stroke_w,
+                stroke_fill=(0, 0, 0, shadow_alpha),
+                letter_spacing=letter_spacing,
+            )
+            y += (line_heights[i] if i < len(line_heights) else font_size) + line_spacing
+        if shadow_blur > 0:
+            sh_layer = sh_layer.filter(ImageFilter.GaussianBlur(shadow_blur))
+        img = Image.alpha_composite(img, sh_layer)
+
+    # Main text
+    main_layer = _render_text_layer(
+        fg, stroke_w=text_stroke_w, stroke_color=text_stroke if text_stroke else None
+    )
+    img = Image.alpha_composite(img, main_layer)
+
+    # Tilt
+    if tilt_deg:
+        img = img.rotate(tilt_deg, resample=Image.BICUBIC, expand=True)
 
     img.save(output_path)
-    return output_path, canvas_w, canvas_h
+    return output_path, img.size[0], img.size[1]
 
 
 def add_hook_to_video(
@@ -212,9 +391,8 @@ def add_hook_to_video(
     output_path: str,
     position: str = "top",
     font_scale: float = 1.0,
-    style: str = "serif_white",
+    style: str = "serif_card",
 ) -> str:
-    """Overlay hook image onto video. Returns output_path on success."""
     if not text or not text.strip():
         raise ValueError("hook text empty")
     if not os.path.exists(video_path):
