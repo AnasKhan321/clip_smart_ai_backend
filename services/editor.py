@@ -55,6 +55,7 @@ def _build_video_filter(
     focus_mode: str,
     focus_crop_expr: Optional[dict],
     captions_ass_path: Optional[str],
+    hook_overlay_xy: Optional[tuple] = None,
 ) -> str:
     """Build a single -filter_complex string ending at [out]."""
     # Stage 1: aspect transform → [composed]
@@ -105,13 +106,22 @@ def _build_video_filter(
         # Native / 16:9: just normalize to 1080p height
         chain = "[0:v]scale=-2:1080[composed]"
 
-    # Stage 2: caption burn → [out]
+    # Stage 2: hook overlay (PNG as 2nd input [1:v]) → [framed]
+    if hook_overlay_xy is not None:
+        hx, hy = hook_overlay_xy
+        chain += f";[composed][1:v]overlay={hx}:{hy}[framed]"
+        composed_label = "framed"
+    else:
+        composed_label = "composed"
+
+    # Stage 3: caption burn → [out]
     if captions_ass_path:
         escaped = captions_ass_path.replace("\\", "\\\\").replace(":", "\\:")
-        chain += f";[composed]ass={escaped}[out]"
+        chain += f";[{composed_label}]ass={escaped}[out]"
     else:
-        # Rename [composed] → [out] so the -map target is consistent
-        chain = chain[::-1].replace("[composed]"[::-1], "[out]"[::-1], 1)[::-1]
+        # Rename last label → [out] so the -map target is consistent
+        old_label = f"[{composed_label}]"
+        chain = chain[::-1].replace(old_label[::-1], "[out]"[::-1], 1)[::-1]
 
     return chain
 
@@ -364,6 +374,9 @@ def render_and_caption_clip(
     source_dims: Optional[tuple] = None,
     profile: str = "preview",
     face_clip_range: Optional[tuple] = None,
+    hook_png_path: Optional[str] = None,
+    hook_overlay_x: int = 0,
+    hook_overlay_y: int = 0,
 ) -> dict:
     """One ffmpeg pass: cut → aspect transform → caption burn.
 
@@ -463,19 +476,20 @@ def render_and_caption_clip(
                 f.write(ass_content)
             captions_ass_path = ass_path
 
+    hook_xy = (hook_overlay_x, hook_overlay_y) if hook_png_path else None
     filter_complex = _build_video_filter(
-        aspect_ratio, focus_mode, focus_crop_expr, captions_ass_path
+        aspect_ratio, focus_mode, focus_crop_expr, captions_ass_path,
+        hook_overlay_xy=hook_xy,
     )
 
     # Use libass-enabled ffmpeg if captions are baked in
     ff_bin = ffmpeg_path(require_libass=bool(captions_ass_path))
 
     def _run(video_opts: list[str]) -> tuple[int, str]:
-        cmd = [
-            ff_bin, "-y",
-            "-ss", str(start),
-            "-i", source,
-            "-t", str(end - start),
+        cmd = [ff_bin, "-y", "-ss", str(start), "-i", source, "-t", str(end - start)]
+        if hook_png_path:
+            cmd += ["-i", hook_png_path]
+        cmd += [
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-map", "0:a?",

@@ -1,8 +1,8 @@
 import os
 import shutil
-import subprocess
 import logging
 from pathlib import Path
+from typing import Optional
 
 from services.editor import render_and_caption_clip
 from services.transcriber import load_transcript
@@ -107,7 +107,62 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     except FileNotFoundError:
         transcript = None
 
-    # Single-pass: cut + aspect transform + captions all in one ffmpeg call
+    # Pre-render hook PNG so we can fold the overlay into the SAME ffmpeg
+    # invocation as cut + aspect + captions — eliminates a second full
+    # re-encode and roughly halves wall-clock for hooked exports on
+    # Railway shared vCPU.
+    hook_png_path: Optional[str] = None
+    hook_overlay_x = 0
+    hook_overlay_y = 0
+    if hook_text:
+        from services.hook_overlay import create_hook_image
+        # Output canvas size depends on aspect_ratio. render_and_caption_clip
+        # always produces 1080-wide for 9:16/1:1/square_in_vertical; for 16:9
+        # height is normalized to 1080 with proportional width.
+        if aspect_ratio in ("9:16", "square_in_vertical"):
+            out_w, out_h = 1080, 1920
+        elif aspect_ratio == "1:1":
+            out_w, out_h = 1080, 1080
+        else:  # 16:9 / native — common 1920x1080
+            out_w, out_h = 1920, 1080
+
+        target_box_w = int(out_w * 0.9)
+        hook_png_path = str(clips_dir / f"clip_{rank:03d}_hook.png")
+        try:
+            _, box_w, box_h = create_hook_image(
+                hook_text, target_box_w, hook_png_path,
+                font_scale=hook_font_scale, style=hook_style,
+            )
+            hook_overlay_x = (out_w - box_w) // 2
+            if hook_y_pct is not None:
+                pct = max(0.0, min(100.0, float(hook_y_pct))) / 100.0
+                hook_overlay_y = int(pct * out_h)
+                hook_overlay_y = max(0, min(out_h - box_h, hook_overlay_y))
+            elif aspect_ratio == "square_in_vertical":
+                margin = 30
+                square_top = max(0, (out_h - out_w) // 2)
+                square_bot = square_top + out_w
+                if hook_position == "center":
+                    hook_overlay_y = (out_h - box_h) // 2
+                elif hook_position == "bottom":
+                    hook_overlay_y = max(square_top, square_bot - box_h - margin)
+                else:
+                    hook_overlay_y = square_top + margin
+            else:
+                if hook_position == "center":
+                    hook_overlay_y = (out_h - box_h) // 2
+                elif hook_position == "bottom":
+                    hook_overlay_y = int(out_h * 0.70)
+                else:
+                    hook_overlay_y = int(out_h * 0.10)
+            logger.info("hook overlay: clip=%s style=%s pos=(%d,%d) box=%dx%d",
+                        clip.get("rank"), hook_style,
+                        hook_overlay_x, hook_overlay_y, box_w, box_h)
+        except Exception as exc:
+            logger.exception("hook PNG render failed for clip %s", clip.get("rank"))
+            raise RuntimeError(f"hook overlay failed: {exc}") from exc
+
+    # Single-pass: cut + aspect + hook overlay + captions in one ffmpeg call
     render_profile = "face_export" if focus_mode == "face" else "export"
     result = render_and_caption_clip(
         job_id, clip,
@@ -119,38 +174,20 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         transcript=transcript,
         profile=render_profile,
         face_clip_range=face_clip_range if focus_mode == "face" else None,
+        hook_png_path=hook_png_path,
+        hook_overlay_x=hook_overlay_x,
+        hook_overlay_y=hook_overlay_y,
     )
     if result["error"]:
         raise RuntimeError(f"Export render failed: {result['error']}")
 
-    source_for_copy = result["final_clip_path"]
-    if hook_text:
-        from services.hook_overlay import add_hook_to_video
-        hooked_path = str(Path(source_for_copy).with_name(
-            Path(source_for_copy).stem + "_hook.mp4"
-        ))
+    if hook_png_path and os.path.exists(hook_png_path):
         try:
-            logger.info("applying hook overlay: clip=%s style=%s pos=%s scale=%s text=%r",
-                        clip.get("rank"), hook_style, hook_position, hook_font_scale, hook_text[:60])
-            add_hook_to_video(
-                source_for_copy, hook_text, hooked_path,
-                position=hook_position, font_scale=hook_font_scale,
-                style=hook_style, aspect_ratio=aspect_ratio,
-                y_pct=hook_y_pct,
-            )
-            if not Path(hooked_path).exists() or Path(hooked_path).stat().st_size < 1024:
-                raise RuntimeError(f"hook overlay produced empty file: {hooked_path}")
-            source_for_copy = hooked_path
-            logger.info("hook overlay OK: %s", hooked_path)
-        except subprocess.CalledProcessError as exc:
-            stderr = (exc.stderr or b"").decode(errors="ignore")[-500:]
-            logger.error("hook overlay ffmpeg failed for clip %s: %s", clip.get("rank"), stderr)
-            raise RuntimeError(f"hook overlay failed: {stderr}") from exc
-        except Exception as exc:
-            logger.exception("hook overlay failed for clip %s", clip.get("rank"))
-            raise RuntimeError(f"hook overlay failed: {exc}") from exc
+            os.remove(hook_png_path)
+        except OSError:
+            pass
 
-    shutil.copy(source_for_copy, export_path)
+    shutil.copy(result["final_clip_path"], export_path)
 
     if not Path(export_path).exists() or Path(export_path).stat().st_size < 1024:
         raise RuntimeError(f"Export produced empty or missing file: {export_path}")
