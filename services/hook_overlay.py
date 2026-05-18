@@ -85,9 +85,9 @@ HOOK_STYLES = {
         "fg": (0, 0, 0, 255),
         "box_outline": (0, 0, 0, 255),
         "box_outline_w": 5,
-        "shadow_offset": (8, 10),
-        "shadow_alpha": 180,
-        "shadow_blur": 6,
+        "shadow_offset": (12, 14),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
         "corner_radius": 18,
         "padding_x": 30,
         "padding_y": 22,
@@ -114,9 +114,9 @@ HOOK_STYLES = {
         "font": FONT_INTER,
         "bg": (255, 30, 130, 250),
         "fg": (255, 255, 255, 255),
-        "shadow_offset": (8, 10),
-        "shadow_alpha": 200,
-        "shadow_blur": 6,
+        "shadow_offset": (12, 14),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
         "corner_radius": 22,
         "padding_x": 30,
         "padding_y": 22,
@@ -130,9 +130,9 @@ HOOK_STYLES = {
         "fg": (255, 255, 255, 255),
         "box_outline": (255, 255, 255, 255),
         "box_outline_w": 3,
-        "shadow_offset": (6, 8),
-        "shadow_alpha": 200,
-        "shadow_blur": 5,
+        "shadow_offset": (10, 12),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
         "corner_radius": 4,
         "padding_x": 34,
         "padding_y": 20,
@@ -173,9 +173,9 @@ HOOK_STYLES = {
         "font": FONT_INTER,
         "bg_gradient": ((255, 110, 60, 250), (255, 60, 150, 250)),  # orange → pink
         "fg": (255, 255, 255, 255),
-        "shadow_offset": (6, 8),
-        "shadow_alpha": 180,
-        "shadow_blur": 6,
+        "shadow_offset": (10, 12),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
         "corner_radius": 20,
         "padding_x": 30,
         "padding_y": 22,
@@ -187,9 +187,9 @@ HOOK_STYLES = {
         "font": FONT_INTER,
         "bg_gradient": ((0, 200, 255, 250), (120, 80, 255, 250)),  # cyan → purple
         "fg": (255, 255, 255, 255),
-        "shadow_offset": (6, 8),
-        "shadow_alpha": 180,
-        "shadow_blur": 6,
+        "shadow_offset": (10, 12),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
         "corner_radius": 20,
         "padding_x": 30,
         "padding_y": 22,
@@ -200,12 +200,12 @@ HOOK_STYLES = {
         "label": "Gold luxe",
         "font": FONT_SERIF,
         "bg": (15, 15, 15, 250),
-        "fg": (212, 175, 55, 255),  # gold
+        "fg": (212, 175, 55, 255),
         "box_outline": (212, 175, 55, 255),
         "box_outline_w": 2,
-        "shadow_offset": (4, 6),
-        "shadow_alpha": 200,
-        "shadow_blur": 6,
+        "shadow_offset": (8, 10),
+        "shadow_alpha": 230,
+        "shadow_blur": 0,
         "corner_radius": 0,
         "padding_x": 32,
         "padding_y": 22,
@@ -493,9 +493,11 @@ def create_hook_image(
     )
     img = Image.alpha_composite(img, main_layer)
 
-    # Tilt
+    # Tilt — PIL rotate is CCW for positive angle, CSS rotate is CW. Negate
+    # so backend output matches frontend live-preview direction (sticker tilts
+    # left/right the same way user picked in modal).
     if tilt_deg:
-        img = img.rotate(tilt_deg, resample=Image.BICUBIC, expand=True)
+        img = img.rotate(-tilt_deg, resample=Image.BICUBIC, expand=True)
 
     img.save(output_path)
     return output_path, img.size[0], img.size[1]
