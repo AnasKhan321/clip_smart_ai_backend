@@ -263,6 +263,16 @@ def export_clip_endpoint(
     }
 
 
+import threading as _threading
+
+# Cap concurrent exports to prevent RAM spikes from parallel ffmpeg jobs
+# (each can use 500MB-1.5GB on Railway shared vCPU = OOM kill at 2+ jobs).
+# Override via MAX_CONCURRENT_EXPORTS env.
+_EXPORT_SEMAPHORE = _threading.BoundedSemaphore(
+    int(os.getenv("MAX_CONCURRENT_EXPORTS", "1"))
+)
+
+
 def _spawn_export_background(clip_id: str, job_id: str,
                              clip_dict: dict, options: dict) -> None:
     """Run export in a daemon thread with a fresh DB session."""
@@ -271,7 +281,12 @@ def _spawn_export_background(clip_id: str, job_id: str,
 
     def _run():
         s = SessionLocal()
+        acquired = False
         try:
+            logger.info("export queue: acquiring slot for clip %s", clip_id)
+            _EXPORT_SEMAPHORE.acquire()
+            acquired = True
+            logger.info("export queue: slot acquired for clip %s, starting render", clip_id)
             try:
                 export_path = export_clip(job_id, clip_dict, options)
             except Exception as exc:
@@ -311,6 +326,11 @@ def _spawn_export_background(clip_id: str, job_id: str,
             logger.info("export done: clip=%s path=%s status=%s",
                         clip_id, export_path, row.status)
         finally:
+            if acquired:
+                try:
+                    _EXPORT_SEMAPHORE.release()
+                except Exception:
+                    pass
             try:
                 s.close()
             except Exception:

@@ -27,7 +27,48 @@ print(f"CORS_ORIGINS: {CORS_ORIGINS}")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_tables()
+    # Reset any "exporting" clips left over from a prior worker crash. Without
+    # this they stay stuck forever and the frontend polls until timeout.
+    _reset_stale_exports()
     yield
+
+
+def _reset_stale_exports() -> None:
+    """Mark clips stuck in 'exporting' as 'failed' on startup.
+
+    Background export thread runs in-process; if Railway restarts the worker
+    mid-encode (OOM, redeploy), status never flips → permanent 'exporting'.
+    """
+    import datetime
+    import logging
+    from database import SessionLocal
+    from models import Clip
+    logger = logging.getLogger(__name__)
+    s = SessionLocal()
+    try:
+        # Anything older than 5 min in 'exporting' is presumed dead. New
+        # legitimate exports started after restart get their own status row.
+        cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=5)
+        # Some schemas don't have updated_at — fall back to created_at filter
+        # being permissive. We mainly want a one-shot cleanup on startup.
+        stuck = s.query(Clip).filter(Clip.status == "exporting").all()
+        if not stuck:
+            return
+        count = 0
+        for row in stuck:
+            ts = getattr(row, "updated_at", None) or row.created_at
+            if ts and ts > cutoff:
+                continue  # too fresh to be stuck
+            row.status = "failed"
+            row.error_message = "export interrupted (worker restart)"
+            count += 1
+        if count:
+            s.commit()
+            logger.warning("startup sweeper: reset %d stuck 'exporting' clips", count)
+    except Exception as exc:
+        logger.exception("startup sweeper failed: %s", exc)
+    finally:
+        s.close()
 
 
 app = FastAPI(title="ClipForge API", version="1.0.0", lifespan=lifespan)
