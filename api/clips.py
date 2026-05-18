@@ -247,6 +247,7 @@ def export_clip_endpoint(
         "hook_position": body.hook_position,
         "hook_font_scale": body.hook_font_scale,
         "hook_style": body.hook_style,
+        "hook_y_pct": body.hook_y_pct,
     }
     job_id = clip.job_id
 

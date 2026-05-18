@@ -600,7 +600,16 @@ def add_hook_to_video(
     font_scale: float = 1.0,
     style: str = "serif_card",
     aspect_ratio: str = "9:16",
+    y_pct: Optional[float] = None,
 ) -> str:
+    """Overlay hook onto video.
+
+    Vertical placement (overlay_y) resolution order:
+      1. If y_pct given (0-100), use that fraction of video_h directly.
+      2. Else fall back to named `position` preset: top=10%, center=50%, bottom=70%.
+    For `square_in_vertical` aspect, presets shift into the inner 1:1 area so
+    the hook doesn't land on the black bars.
+    """
     if not text or not text.strip():
         raise ValueError("hook text empty")
     if not os.path.exists(video_path):
@@ -617,19 +626,22 @@ def add_hook_to_video(
 
         overlay_x = (video_w - box_w) // 2
 
-        # square_in_vertical = 1080x1920 with a 1080x1080 square centered →
-        # black bars top/bottom (each 420px). Place hook INSIDE the square
-        # content area, not over the black bars, so it overlaps the visual.
-        if aspect_ratio == "square_in_vertical":
+        if y_pct is not None:
+            # Slider mode: anchor top-edge of hook at y_pct of video height,
+            # clamped so the whole box stays in frame.
+            pct = max(0.0, min(100.0, float(y_pct))) / 100.0
+            overlay_y = int(pct * video_h)
+            overlay_y = max(0, min(video_h - box_h, overlay_y))
+        elif aspect_ratio == "square_in_vertical":
             margin = 30
-            square_h = video_w  # 1:1 cropped to video_w on both axes
+            square_h = video_w
             square_top = max(0, (video_h - square_h) // 2)
             square_bot = square_top + square_h
             if position == "center":
                 overlay_y = (video_h - box_h) // 2
             elif position == "bottom":
                 overlay_y = max(square_top, square_bot - box_h - margin)
-            else:  # top
+            else:
                 overlay_y = square_top + margin
         else:
             if position == "center":

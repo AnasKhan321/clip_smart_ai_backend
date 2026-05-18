@@ -78,3 +78,4 @@ class ExportRequest(BaseModel):
     hook_position: str = "top"  # top | center | bottom
     hook_font_scale: float = 1.0
     hook_style: str = "serif_card"
+    hook_y_pct: Optional[float] = None  # 0-100, overrides hook_position when set

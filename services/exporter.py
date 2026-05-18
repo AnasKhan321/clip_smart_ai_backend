@@ -65,6 +65,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     hook_position = options.get("hook_position", "top")
     hook_font_scale = float(options.get("hook_font_scale", 1.0))
     hook_style = options.get("hook_style", "serif_card")
+    hook_y_pct = options.get("hook_y_pct")
     # Focus modes (face/speaker) only make sense when re-framing to vertical.
     # For 16:9 / 1:1 they'd run heavy track computation (face detection on
     # the entire source) for no benefit — the filter chain ignores them.
@@ -135,6 +136,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
                 source_for_copy, hook_text, hooked_path,
                 position=hook_position, font_scale=hook_font_scale,
                 style=hook_style, aspect_ratio=aspect_ratio,
+                y_pct=hook_y_pct,
             )
             if not Path(hooked_path).exists() or Path(hooked_path).stat().st_size < 1024:
                 raise RuntimeError(f"hook overlay produced empty file: {hooked_path}")
