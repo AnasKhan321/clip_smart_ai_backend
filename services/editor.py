@@ -91,6 +91,16 @@ def _build_video_filter(
             "[0:v]scale=1080:1080:force_original_aspect_ratio=increase,"
             "crop=1080:1080[composed]"
         )
+    elif aspect_ratio == "square_in_vertical":
+        # 9:16 output (1080x1920): source center-cropped to 1:1 (1080x1080),
+        # centered vertically on a solid BLACK 9:16 background. Classic
+        # TikTok/Reels square-on-black layout.
+        chain = (
+            "[0:v]scale=1080:1080:force_original_aspect_ratio=increase,"
+            "crop=1080:1080,"
+            "pad=1080:1920:0:(1920-1080)/2:black"
+            "[composed]"
+        )
     else:
         # Native / 16:9: just normalize to 1080p height
         chain = "[0:v]scale=-2:1080[composed]"
