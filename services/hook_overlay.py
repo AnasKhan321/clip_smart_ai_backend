@@ -18,6 +18,22 @@ FONTS_DIR = Path(__file__).resolve().parent.parent / "fonts"
 FONT_SERIF = str(FONTS_DIR / "NotoSerif-Bold.ttf")
 FONT_INTER = str(FONTS_DIR / "Inter-Black.ttf")
 FONT_ANTON = str(FONTS_DIR / "Anton-Regular.ttf")
+FONT_DEVANAGARI = str(FONTS_DIR / "NotoSansDevanagari.ttf")
+
+
+def _has_devanagari(text: str) -> bool:
+    return any("ऀ" <= ch <= "ॿ" for ch in text)
+
+
+def _font_for_text(preferred_path: str, text: str) -> str:
+    """PIL has no per-glyph fallback — single font must cover all glyphs or
+    tofu boxes render. If text contains Devanagari, swap whichever bundled
+    Latin-only font the style picked → NotoSansDevanagari (covers both)."""
+    if _has_devanagari(text):
+        # None of the bundled "look" fonts (Inter / Anton / NotoSerif-Bold Latin
+        # subset) cover Devanagari. Always swap on Devanagari presence.
+        return FONT_DEVANAGARI
+    return preferred_path
 
 
 # Hook style presets. Each preset can specify:
@@ -152,6 +168,75 @@ HOOK_STYLES = {
         "padding_x": 28,
         "padding_y": 22,
     },
+    "sunset_gradient": {
+        "label": "Sunset",
+        "font": FONT_INTER,
+        "bg_gradient": ((255, 110, 60, 250), (255, 60, 150, 250)),  # orange → pink
+        "fg": (255, 255, 255, 255),
+        "shadow_offset": (6, 8),
+        "shadow_alpha": 180,
+        "shadow_blur": 6,
+        "corner_radius": 20,
+        "padding_x": 30,
+        "padding_y": 22,
+        "uppercase": True,
+        "letter_spacing_px": 1,
+    },
+    "ocean_gradient": {
+        "label": "Ocean",
+        "font": FONT_INTER,
+        "bg_gradient": ((0, 200, 255, 250), (120, 80, 255, 250)),  # cyan → purple
+        "fg": (255, 255, 255, 255),
+        "shadow_offset": (6, 8),
+        "shadow_alpha": 180,
+        "shadow_blur": 6,
+        "corner_radius": 20,
+        "padding_x": 30,
+        "padding_y": 22,
+        "uppercase": True,
+        "letter_spacing_px": 1,
+    },
+    "gold_luxe": {
+        "label": "Gold luxe",
+        "font": FONT_SERIF,
+        "bg": (15, 15, 15, 250),
+        "fg": (212, 175, 55, 255),  # gold
+        "box_outline": (212, 175, 55, 255),
+        "box_outline_w": 2,
+        "shadow_offset": (4, 6),
+        "shadow_alpha": 200,
+        "shadow_blur": 6,
+        "corner_radius": 0,
+        "padding_x": 32,
+        "padding_y": 22,
+        "letter_spacing_px": 2,
+        "uppercase": True,
+    },
+    "pastel_card": {
+        "label": "Pastel",
+        "font": FONT_INTER,
+        "bg": (255, 220, 235, 245),
+        "fg": (110, 30, 80, 255),
+        "shadow_offset": (4, 6),
+        "shadow_alpha": 140,
+        "shadow_blur": 10,
+        "corner_radius": 22,
+        "padding_x": 28,
+        "padding_y": 22,
+        "tilt_deg": 1.5,
+    },
+    "matrix_green": {
+        "label": "Matrix",
+        "font": FONT_INTER,
+        "bg": (0, 0, 0, 250),
+        "fg": (0, 255, 90, 255),
+        "glow": [((0, 255, 90, 200), 8, 2)],
+        "corner_radius": 6,
+        "padding_x": 28,
+        "padding_y": 20,
+        "uppercase": True,
+        "letter_spacing_px": 1,
+    },
 }
 
 
@@ -227,7 +312,10 @@ def create_hook_image(
     line_spacing = 16
     corner_radius = int(cfg.get("corner_radius", 0))
     bg = cfg.get("bg")
+    bg_gradient = cfg.get("bg_gradient")
     fg = cfg["fg"]
+    # Treat gradient as "has box" for layout/shadow purposes.
+    has_box = bg is not None or bg_gradient is not None
     text_stroke = cfg.get("text_stroke")
     text_stroke_w = int(cfg.get("text_stroke_w", 0))
     box_outline = cfg.get("box_outline")
@@ -241,7 +329,8 @@ def create_hook_image(
 
     base_font_size = int(target_width * 0.05)
     font_size = max(12, int(base_font_size * font_scale))
-    font = _load_font(cfg.get("font"), font_size)
+    font_path = _font_for_text(cfg.get("font") or FONT_SERIF, text)
+    font = _load_font(font_path, font_size)
 
     dummy = Image.new("RGBA", (1, 1))
     draw = ImageDraw.Draw(dummy)
@@ -297,7 +386,7 @@ def create_hook_image(
     img = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
     # Drop shadow (only when there is a solid box; otherwise shadow follows text via stroke)
-    if bg is not None and shadow_alpha > 0 and (shadow_offset[0] or shadow_offset[1] or shadow_blur):
+    if has_box and shadow_alpha > 0 and (shadow_offset[0] or shadow_offset[1] or shadow_blur):
         shadow_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
         sd = ImageDraw.Draw(shadow_layer)
         sb = [
@@ -309,16 +398,43 @@ def create_hook_image(
             shadow_layer = shadow_layer.filter(ImageFilter.GaussianBlur(shadow_blur))
         img = Image.alpha_composite(img, shadow_layer)
 
-    # Box fill + outline
-    if bg is not None:
+    # Box fill (solid or gradient) + outline
+    if has_box:
         box_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
-        bd = ImageDraw.Draw(box_layer)
-        rect = [(margin, margin), (margin + box_w, margin + box_h)]
-        bd.rounded_rectangle(
-            rect, radius=corner_radius, fill=bg,
-            outline=box_outline if box_outline else None,
-            width=box_outline_w if box_outline else 0,
-        )
+        if bg_gradient is not None:
+            # Build a per-pixel horizontal linear gradient over the box rect,
+            # then mask it with a rounded-rect so corners stay clean.
+            c0, c1 = bg_gradient
+            grad = Image.new("RGBA", (box_w, box_h), (0, 0, 0, 0))
+            gp = grad.load()
+            for x in range(box_w):
+                t = x / max(1, box_w - 1)
+                r = int(c0[0] + (c1[0] - c0[0]) * t)
+                g = int(c0[1] + (c1[1] - c0[1]) * t)
+                b = int(c0[2] + (c1[2] - c0[2]) * t)
+                a = int(c0[3] + (c1[3] - c0[3]) * t)
+                for y in range(box_h):
+                    gp[x, y] = (r, g, b, a)
+            mask = Image.new("L", (box_w, box_h), 0)
+            mdraw = ImageDraw.Draw(mask)
+            mdraw.rounded_rectangle(
+                [(0, 0), (box_w - 1, box_h - 1)], radius=corner_radius, fill=255
+            )
+            box_layer.paste(grad, (margin, margin), mask)
+            if box_outline and box_outline_w > 0:
+                od = ImageDraw.Draw(box_layer)
+                od.rounded_rectangle(
+                    [(margin, margin), (margin + box_w, margin + box_h)],
+                    radius=corner_radius, outline=box_outline, width=box_outline_w,
+                )
+        else:
+            bd = ImageDraw.Draw(box_layer)
+            rect = [(margin, margin), (margin + box_w, margin + box_h)]
+            bd.rounded_rectangle(
+                rect, radius=corner_radius, fill=bg,
+                outline=box_outline if box_outline else None,
+                width=box_outline_w if box_outline else 0,
+            )
         img = Image.alpha_composite(img, box_layer)
 
     # Glow layers (render text onto blurred copies, composite under main text)
@@ -350,7 +466,7 @@ def create_hook_image(
         img = Image.alpha_composite(img, g_layer)
 
     # Drop shadow for stroked text (no box case)
-    if bg is None and shadow_alpha > 0 and (shadow_offset[0] or shadow_offset[1]):
+    if not has_box and shadow_alpha > 0 and (shadow_offset[0] or shadow_offset[1]):
         sh_layer = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
         sd = ImageDraw.Draw(sh_layer)
         y = text_origin_y + shadow_offset[1]
