@@ -485,6 +485,13 @@ def render_and_caption_clip(
     # Use libass-enabled ffmpeg if captions are baked in
     ff_bin = ffmpeg_path(require_libass=bool(captions_ass_path))
 
+    # For native 16:9 export the only work is caption burn-in — the scale
+    # filter is a no-op-ish 1080p normalize. Use a faster preset so a 60s
+    # clip doesn't take 5 min on Railway shared CPU.
+    effective_profile = profile
+    if aspect_ratio in ("16:9", "native") and profile == "export":
+        effective_profile = "preview"  # preset=ultrafast, CRF 26 — still clean
+
     # Export profiles get a longer timeout — they use heavier encode settings
     # and complex filter chains (blur+overlay for 9:16). Preview stays at 10min.
     render_timeout = 1200 if effective_profile in ("export", "face_export") else 600
@@ -509,13 +516,6 @@ def render_and_caption_clip(
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or b"").decode("utf-8", errors="ignore")[-500:]
             return e.returncode, stderr
-
-    # For native 16:9 export the only work is caption burn-in — the scale
-    # filter is a no-op-ish 1080p normalize. Use a faster preset so a 60s
-    # clip doesn't take 5 min on Railway shared CPU.
-    effective_profile = profile
-    if aspect_ratio in ("16:9", "native") and profile == "export":
-        effective_profile = "preview"  # preset=ultrafast, CRF 26 — still clean
 
     rc, err = _run(encoder_video_opts(effective_profile))
 
