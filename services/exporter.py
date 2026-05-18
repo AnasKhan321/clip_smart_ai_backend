@@ -134,7 +134,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
             add_hook_to_video(
                 source_for_copy, hook_text, hooked_path,
                 position=hook_position, font_scale=hook_font_scale,
-                style=hook_style,
+                style=hook_style, aspect_ratio=aspect_ratio,
             )
             if not Path(hooked_path).exists() or Path(hooked_path).stat().st_size < 1024:
                 raise RuntimeError(f"hook overlay produced empty file: {hooked_path}")

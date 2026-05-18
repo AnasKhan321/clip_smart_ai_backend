@@ -393,7 +393,10 @@ def create_hook_image(
     # edges, cleaner strokes, no jaggies on tilted text. ~2x memory, ~4x ops
     # but render is a one-shot per export (~50ms) so cost negligible.
     SUPER = 2
-    base_font_size = int(target_width * 0.062)  # bumped from 5% — more readable on phones
+    # Font sized as % of video width. 4.6% on 1080-wide ≈ 50px → matches the
+    # compact sticker proportions seen in the live preview. Higher values
+    # forced text to wrap to 2 lines for short hooks.
+    base_font_size = int(target_width * 0.046)
     font_size = max(14, int(base_font_size * font_scale))
     font_size_ss = font_size * SUPER
     font_path = _font_for_text(cfg.get("font") or FONT_SERIF, text)
@@ -451,7 +454,9 @@ def create_hook_image(
     glow_pad = max((int(l[1] + l[2]) for l in glow_layers), default=0)
     inner_pad_text = max(text_stroke_w, glow_pad)
 
-    box_w = max(max_line_w + 2 * padding_x, int(target_width_ss * 0.3)) + 2 * inner_pad_text
+    # Box hugs content (no min-width). Short hooks → small compact sticker,
+    # long hooks → wide banner. Matches preview's content-fit behavior.
+    box_w = max_line_w + 2 * padding_x + 2 * inner_pad_text
     if not line_heights:
         total_text_h = font_size_ss
     else:
@@ -594,6 +599,7 @@ def add_hook_to_video(
     position: str = "top",
     font_scale: float = 1.0,
     style: str = "serif_card",
+    aspect_ratio: str = "9:16",
 ) -> str:
     if not text or not text.strip():
         raise ValueError("hook text empty")
@@ -610,12 +616,28 @@ def add_hook_to_video(
         )
 
         overlay_x = (video_w - box_w) // 2
-        if position == "center":
-            overlay_y = (video_h - box_h) // 2
-        elif position == "bottom":
-            overlay_y = int(video_h * 0.70)
+
+        # square_in_vertical = 1080x1920 with a 1080x1080 square centered →
+        # black bars top/bottom (each 420px). Place hook INSIDE the square
+        # content area, not over the black bars, so it overlaps the visual.
+        if aspect_ratio == "square_in_vertical":
+            margin = 30
+            square_h = video_w  # 1:1 cropped to video_w on both axes
+            square_top = max(0, (video_h - square_h) // 2)
+            square_bot = square_top + square_h
+            if position == "center":
+                overlay_y = (video_h - box_h) // 2
+            elif position == "bottom":
+                overlay_y = max(square_top, square_bot - box_h - margin)
+            else:  # top
+                overlay_y = square_top + margin
         else:
-            overlay_y = int(video_h * 0.10)
+            if position == "center":
+                overlay_y = (video_h - box_h) // 2
+            elif position == "bottom":
+                overlay_y = int(video_h * 0.70)
+            else:
+                overlay_y = int(video_h * 0.10)
 
         cmd = [
             ffmpeg_path(), "-y",
