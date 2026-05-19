@@ -114,6 +114,8 @@ HOOK_STYLES = {
         "font": FONT_INTER,
         "bg": (255, 30, 130, 250),
         "fg": (255, 255, 255, 255),
+        "box_outline": (194, 0, 110, 255),
+        "box_outline_w": 5,
         "shadow_offset": (12, 14),
         "shadow_alpha": 230,
         "shadow_blur": 0,
