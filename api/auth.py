@@ -87,7 +87,11 @@ def signup(payload: SignUpIn, db: Session = Depends(get_db)):
 @router.post("/signin", response_model=AuthOut)
 def signin(payload: SignInIn, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == payload.email).first()
-    if not user or not user.password_hash or not verify_password(payload.password, user.password_hash):
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
+    if not user.password_hash:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "This account uses Google sign-in. Please use the Google button instead.")
+    if not verify_password(payload.password, user.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid email or password")
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account disabled")
