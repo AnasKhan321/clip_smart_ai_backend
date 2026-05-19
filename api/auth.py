@@ -92,6 +92,8 @@ def signin(payload: SignInIn, db: Session = Depends(get_db)):
     if not user.is_active:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Account disabled")
 
+    if is_admin_email(user.email) and not user.is_admin:
+        user.is_admin = True
     user.last_login_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
