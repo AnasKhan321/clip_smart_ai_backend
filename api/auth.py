@@ -13,6 +13,7 @@ from auth import (
     verify_password,
     create_access_token,
     verify_google_id_token,
+    verify_google_access_token,
     get_current_user,
     is_admin_email,
 )
@@ -34,7 +35,8 @@ class SignInIn(BaseModel):
 
 
 class GoogleSignInIn(BaseModel):
-    id_token: str
+    id_token: Optional[str] = None
+    access_token: Optional[str] = None
 
 
 class UserOut(BaseModel):
@@ -107,7 +109,12 @@ def signin(payload: SignInIn, db: Session = Depends(get_db)):
 
 @router.post("/google", response_model=AuthOut)
 def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
-    info = verify_google_id_token(payload.id_token)
+    if not payload.id_token and not payload.access_token:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide id_token or access_token")
+    if payload.id_token:
+        info = verify_google_id_token(payload.id_token)
+    else:
+        info = verify_google_access_token(payload.access_token)
     if not info["email_verified"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "Google email not verified")
 

@@ -68,6 +68,29 @@ def verify_google_id_token(token: str) -> dict:
     }
 
 
+# ── Google access token verify (useGoogleLogin flow) ────────
+def verify_google_access_token(access_token: str) -> dict:
+    import urllib.request, json as _json
+    req = urllib.request.Request(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            info = _json.loads(resp.read())
+    except Exception as e:
+        raise HTTPException(401, f"Invalid Google access token: {e}")
+    if not info.get("sub"):
+        raise HTTPException(401, "Google access token: missing sub")
+    return {
+        "google_id": info["sub"],
+        "email": info["email"],
+        "name": info.get("name"),
+        "avatar_url": info.get("picture"),
+        "email_verified": info.get("email_verified", False),
+    }
+
+
 # ── FastAPI dependencies ─────────────────────────────────────
 def get_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
