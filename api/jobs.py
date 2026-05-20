@@ -164,6 +164,7 @@ class JobFromR2In(BaseModel):
     min_clip_duration: int = 20
     max_clip_duration: int = 90
     target_aspect_ratio: str = "9:16"
+    custom_prompt: Optional[str] = None
 
 
 class AbortUploadIn(BaseModel):
@@ -241,6 +242,9 @@ def create_job_from_r2(
         "max_clip_duration": body.max_clip_duration,
         "target_aspect_ratio": body.target_aspect_ratio,
     }
+    _cp = (body.custom_prompt or "").strip()
+    if _cp:
+        options["custom_prompt"] = _cp
     dispatch = run_task_in_background(run_full_pipeline, body.job_id, options)
     return {"job_id": body.job_id, "status": "pending", "dispatch": dispatch}
 
@@ -253,6 +257,7 @@ async def create_job(
     min_clip_duration: int = Form(20),
     max_clip_duration: int = Form(90),
     target_aspect_ratio: str = Form("9:16"),
+    custom_prompt: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -306,11 +311,14 @@ async def create_job(
     options = {
         "source_url": source_url,
         "max_clips": max_clips,
-        "clip_types": [t.strip() for t in clip_types.split(",")],
+        "clip_types": [t.strip() for t in clip_types.split(",") if t.strip()],
         "min_clip_duration": min_clip_duration,
         "max_clip_duration": max_clip_duration,
         "target_aspect_ratio": target_aspect_ratio,
     }
+    _cp = (custom_prompt or "").strip()
+    if _cp:
+        options["custom_prompt"] = _cp
 
     try:
         dispatch = run_task_in_background(run_full_pipeline, job_id, options)
@@ -425,6 +433,9 @@ def more_clips(
         "max_clip_duration": body.get("max_clip_duration", 90),
         "target_aspect_ratio": body.get("target_aspect_ratio", "9:16"),
     }
+    custom_prompt = (body.get("custom_prompt") or "").strip()
+    if custom_prompt:
+        options["custom_prompt"] = custom_prompt
 
     job.status = "analyzing"
     job.stage_progress = 0

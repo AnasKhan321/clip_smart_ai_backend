@@ -266,6 +266,7 @@ def _build_prompt(transcript: dict, enriched: list, options: dict) -> str:
     max_clips = options.get("max_clips", 5)
     title = options.get("video_title", "Unknown")
     threshold = 0.5 if options.get("_relaxed") else 0.65
+    custom_prompt = (options.get("custom_prompt") or "").strip()
 
     enriched_text = "\n".join(
         f"[{seg['start']:.1f}s | {seg['speaker']}] {seg['text']}"
@@ -321,11 +322,27 @@ INDIAN CONTENT CULTURAL DEPTH:
 - **Desi vs. foreign**: Any content that challenges "videshi cheez better hai" or reveals India produces something the world uses → pride + share
 """
 
+    # Build dynamic sections that change when a custom prompt is provided
+    if custom_prompt:
+        task_line = (
+            f"Your task: analyze this transcript and extract the {max_clips} segments that best fulfill "
+            f"the USER INTENT below. Each clip must be a SINGLE UNBROKEN continuous segment — never stitched, never rearranged."
+        )
+        intent_block = f"\n\nUSER INTENT (highest priority — this overrides generic virality scoring):\n{custom_prompt}\n\nEverything else — virality patterns, cultural context, clip-type definitions — serves as supporting guidance. Always ask: does this clip best serve the stated intent?"
+        clip_types_line = f"- Goal: {custom_prompt[:120]}{'...' if len(custom_prompt) > 120 else ''}"
+    else:
+        task_line = (
+            f"Your task: analyze this transcript and extract the {max_clips} segments most likely to go viral "
+            f"as standalone short-form clips. Each clip must be a SINGLE UNBROKEN continuous segment — never stitched, never rearranged."
+        )
+        intent_block = ""
+        clip_types_line = f"- Clip Types to Find: {', '.join(clip_types)}"
+
     return f"""You are a world-class short-form content strategist who has studied thousands of viral Indian Reels, YouTube Shorts, and podcast clips. You understand the psychology of why Indian audiences stop scrolling, watch till the end, and hit share.
 
-Your task: analyze this transcript and extract the {max_clips} segments most likely to go viral as standalone short-form clips. Each clip must be a SINGLE UNBROKEN continuous segment — never stitched, never rearranged.
+{task_line}
 
-Think like a viewer, not an editor. Ask yourself: "If I was scrolling at 2am and this clip autoplayed, would I stop? Would I watch till the end? Would I send it to someone?"
+Think like a viewer, not an editor. Ask yourself: "If I was scrolling at 2am and this clip autoplayed, would I stop? Would I watch till the end? Would I send it to someone?"{intent_block}
 
 ---
 
@@ -333,7 +350,7 @@ VIDEO METADATA:
 - Title: {title}
 - Total Duration: {duration_fmt}
 - Language: {language}
-- Clip Types to Find: {", ".join(clip_types)}
+{clip_types_line}
 - Duration Range: {min_dur}s – {max_dur}s per clip
 
 ---
