@@ -505,6 +505,7 @@ def render_and_caption_clip(
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-map", "0:a?",
+            
             *video_opts,
             *encoder_audio_opts(),
             final_path,
