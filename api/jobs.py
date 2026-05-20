@@ -463,6 +463,10 @@ def _render_manual_clip_bg(clip_id: str):
         job = db.query(Job).filter(Job.id == clip.job_id).first()
         source_dims = (job.source_width, job.source_height) \
             if (job and job.source_width and job.source_height) else None
+
+        from services.exporter import _ensure_local_source
+        _ensure_local_source(clip.job_id)
+
         try:
             transcript = load_transcript(clip.job_id)
         except FileNotFoundError:
@@ -484,23 +488,17 @@ def _render_manual_clip_bg(clip_id: str):
         else:
             clip.final_clip_path = result["final_clip_path"]
             clip.raw_clip_path = None
-            clip.status = "ready"
             if r2.is_enabled() and result["final_clip_path"]:
                 key = r2.clip_key(clip.job_id, clip.rank)
-                clip.r2_clip_key = key
-                _clip_id = clip.id
-                def _clear_key(k, cid=_clip_id):
-                    from database import SessionLocal as _SL
-                    s = _SL()
-                    try:
-                        c = s.query(Clip).filter(Clip.id == cid).first()
-                        if c and c.r2_clip_key == k:
-                            c.r2_clip_key = None
-                            s.commit()
-                    finally:
-                        s.close()
-                r2.upload_in_background(result["final_clip_path"], key,
-                                        on_failure=_clear_key)
+                r2.upload_file(result["final_clip_path"], key)
+                if r2.object_exists(key):
+                    clip.r2_clip_key = key
+                    clip.status = "ready"
+                else:
+                    clip.status = "failed"
+                    clip.error_message = "R2 upload verification failed"
+            else:
+                clip.status = "ready"
         db.commit()
     finally:
         db.close()
@@ -537,6 +535,8 @@ def create_manual_clip(
         reason=body.label or "Manual clip",
         status="rendering",
         user_approved=True,
+        score=0.5,
+        transcript_excerpt="",
     )
     db.add(clip)
     db.commit()
