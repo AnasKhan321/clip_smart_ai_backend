@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class ClipOut(BaseModel):
@@ -16,6 +16,16 @@ class ClipOut(BaseModel):
     score: float = 0.0
     reason: str
     transcript_excerpt: str = ""
+
+    @field_validator('duration_seconds', 'score', mode='before')
+    @classmethod
+    def coerce_float(cls, v):
+        return v if v is not None else 0.0
+
+    @field_validator('transcript_excerpt', mode='before')
+    @classmethod
+    def coerce_str(cls, v):
+        return v if v is not None else ""
     hook_line: Optional[str] = None
     tags: Optional[str] = None
     status: str
