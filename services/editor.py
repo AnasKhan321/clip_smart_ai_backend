@@ -497,10 +497,11 @@ def render_and_caption_clip(
     render_timeout = 1200 if effective_profile in ("export", "face_export") else 600
 
     def _run(video_opts: list[str]) -> tuple[int, str]:
-        cmd = [ff_bin, "-y", "-ss", str(start), "-i", source, "-t", str(end - start)]
+        cmd = [ff_bin, "-y", "-ss", str(start), "-i", source]
         if hook_png_path:
             cmd += ["-i", hook_png_path]
         cmd += [
+            "-t", str(end - start),  # output option — must come after all -i args
             "-filter_complex", filter_complex,
             "-map", "[out]",
             "-map", "0:a?",
