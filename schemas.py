@@ -11,11 +11,11 @@ class ClipOut(BaseModel):
     rank: int
     start_seconds: float
     end_seconds: float
-    duration_seconds: float
+    duration_seconds: float = 0.0
     clip_type: str
-    score: float
+    score: float = 0.0
     reason: str
-    transcript_excerpt: str
+    transcript_excerpt: str = ""
     hook_line: Optional[str] = None
     tags: Optional[str] = None
     status: str
