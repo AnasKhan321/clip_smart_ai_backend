@@ -532,6 +532,7 @@ def create_manual_clip(
         rank=rank,
         start_seconds=body.start_seconds,
         end_seconds=body.end_seconds,
+        duration_seconds=body.end_seconds - body.start_seconds,
         clip_type="manual",
         reason=body.label or "Manual clip",
         status="rendering",
