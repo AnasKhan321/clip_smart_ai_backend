@@ -1,4 +1,5 @@
 """JWT + password hashing + Google ID token verification."""
+import logging
 import os
 from datetime import datetime, timedelta
 from typing import Optional
@@ -14,6 +15,8 @@ from google.oauth2 import id_token as google_id_token
 
 from database import get_db
 from models import User
+
+logger = logging.getLogger(__name__)
 
 # ── Config ───────────────────────────────────────────────────
 SECRET_KEY = os.getenv("AUTH_SECRET_KEY", "change-me-in-prod-please")
@@ -58,36 +61,66 @@ def verify_google_id_token(token: str) -> dict:
             token, google_requests.Request(), GOOGLE_CLIENT_ID
         )
     except ValueError as e:
+        logger.error("Google ID token verification failed: %s", e)
         raise HTTPException(401, f"Invalid Google token: {e}")
+
+    email = info.get("email")
+    if not email:
+        logger.error("Google ID token missing email claim")
+        raise HTTPException(401, "Google token: email claim missing")
+
+    ev = info.get("email_verified", True)
+    if isinstance(ev, str):
+        ev = ev.lower() == "true"
+
     return {
         "google_id": info["sub"],
-        "email": info["email"],
+        "email": email,
         "name": info.get("name"),
         "avatar_url": info.get("picture"),
-        "email_verified": info.get("email_verified", False),
+        "email_verified": ev,
     }
 
 
 # ── Google access token verify (useGoogleLogin flow) ────────
 def verify_google_access_token(access_token: str) -> dict:
-    import urllib.request, json as _json
-    req = urllib.request.Request(
-        "https://www.googleapis.com/oauth2/v3/userinfo",
-        headers={"Authorization": f"Bearer {access_token}"},
-    )
+    import httpx
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            info = _json.loads(resp.read())
+        resp = httpx.get(
+            "https://www.googleapis.com/oauth2/v3/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+            timeout=15,
+        )
+        if resp.status_code != 200:
+            logger.error("Google userinfo returned %s: %s", resp.status_code, resp.text[:300])
+            raise HTTPException(401, f"Google token rejected (status {resp.status_code})")
+        info = resp.json()
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(401, f"Invalid Google access token: {e}")
+        logger.error("Google userinfo request failed: %s", e)
+        raise HTTPException(401, f"Could not verify Google token: {e}")
+
     if not info.get("sub"):
-        raise HTTPException(401, "Google access token: missing sub")
+        logger.error("Google userinfo missing sub: %s", list(info.keys()))
+        raise HTTPException(401, "Google token: missing user ID")
+
+    email = info.get("email")
+    if not email:
+        logger.error("Google userinfo missing email (scopes may be missing): %s", list(info.keys()))
+        raise HTTPException(401, "Google token: email not granted — please re-authorise and allow email access")
+
+    # email_verified may be bool (v3) or string "true"/"false" (v1)
+    ev = info.get("email_verified", True)
+    if isinstance(ev, str):
+        ev = ev.lower() == "true"
+
     return {
         "google_id": info["sub"],
-        "email": info["email"],
+        "email": email,
         "name": info.get("name"),
         "avatar_url": info.get("picture"),
-        "email_verified": info.get("email_verified", False),
+        "email_verified": ev,
     }
 
 
