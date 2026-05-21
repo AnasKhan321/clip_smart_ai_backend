@@ -4,6 +4,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import get_db
@@ -120,9 +122,15 @@ def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
 
     user = (
         db.query(User)
-        .filter((User.google_id == info["google_id"]) | (User.email == info["email"]))
+        .filter(
+            (User.google_id == info["google_id"])
+            | (func.lower(User.email) == info["email"].lower())
+        )
         .first()
     )
+
+    if user and not user.is_active:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Account disabled")
 
     new_user = False
     if user:
@@ -154,7 +162,11 @@ def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
             grant(db, user, bonus, kind="signup_bonus", note="Welcome bonus (Google)")
 
     user.last_login_at = datetime.utcnow()
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status.HTTP_409_CONFLICT, "Google account already linked to another user")
     db.refresh(user)
 
     return AuthOut(access_token=create_access_token(user.id), user=UserOut.model_validate(user))
