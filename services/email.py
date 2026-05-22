@@ -14,6 +14,8 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
 SMTP_SENDER = os.getenv("SMTP_SENDER", SMTP_USERNAME or "no-reply@clipforge.com").strip()
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in ("true", "1", "yes")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
+RESEND_SENDER = os.getenv("RESEND_SENDER", "").strip()
 
 def send_verification_email(email: str, name: str, token: str):
     verification_link = f"{FRONTEND_URL}/verify-email?token={token}"
@@ -49,6 +51,41 @@ def send_verification_email(email: str, name: str, token: str):
       </body>
     </html>
     """
+
+    # If Resend API key is configured, send via Resend API (HTTPS - never blocked by cloud hosts)
+    if RESEND_API_KEY:
+        try:
+            import httpx
+            resend_sender = RESEND_SENDER or SMTP_SENDER
+            if not resend_sender or "@gmail.com" in resend_sender.lower() or "no-reply@clipforge.com" in resend_sender.lower():
+                resend_sender = "ClipForge <onboarding@resend.dev>"
+
+            resp = httpx.post(
+                "https://api.resend.com/emails",
+                headers={
+                    "Authorization": f"Bearer {RESEND_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "from": resend_sender,
+                    "to": email,
+                    "subject": subject,
+                    "html": html_content,
+                },
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Verification email successfully sent to {email} via Resend API")
+                return
+            else:
+                logger.error(f"Resend API error (status {resp.status_code}): {resp.text}")
+                raise Exception(f"Resend error: {resp.text}")
+        except Exception as e:
+            logger.error(f"Failed to send email via Resend API: {e}")
+            if not SMTP_HOST:
+                print(f"Resend error. Email verification fallback URL: {verification_link}", flush=True)
+                raise e
+            # Else fall through to SMTP fallback below
 
     # If no SMTP host is configured, log verification link to console (dev fallback)
     if not SMTP_HOST:
