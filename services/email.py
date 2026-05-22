@@ -84,7 +84,7 @@ def send_verification_email(email: str, name: str, token: str):
             logger.error(f"Failed to send email via Resend API: {e}")
             if not SMTP_HOST:
                 print(f"Resend error. Email verification fallback URL: {verification_link}", flush=True)
-                raise e
+                return
             # Else fall through to SMTP fallback below
 
     # If no SMTP host is configured, log verification link to console (dev fallback)
@@ -146,4 +146,3 @@ def send_verification_email(email: str, name: str, token: str):
         logger.error(f"Failed to send email to {email} via SMTP: {e}")
         # Log to console so developer is not blocked even if SMTP fails
         print(f"SMTP error. Email verification fallback URL: {verification_link}", flush=True)
-        raise e
