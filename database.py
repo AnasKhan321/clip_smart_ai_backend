@@ -49,7 +49,7 @@ _PENDING_COLUMNS = [
     ("jobs", "source_height", "INTEGER"),
     ("jobs", "r2_source_key", "VARCHAR"),
     ("clips", "r2_clip_key", "VARCHAR"),
-    ("users", "is_email_verified", "BOOLEAN DEFAULT 0"),
+    ("users", "is_email_verified", "BOOLEAN DEFAULT FALSE"),
 ]
 
 
