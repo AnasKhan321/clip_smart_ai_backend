@@ -52,6 +52,27 @@ def decode_token(token: str) -> Optional[str]:
         return None
 
 
+def create_verification_token(email: str, user_id: str) -> str:
+    expire = datetime.utcnow() + timedelta(hours=24)
+    payload = {
+        "sub": user_id,
+        "email": email,
+        "type": "email_verification",
+        "exp": expire
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def decode_verification_token(token: str) -> Optional[dict]:
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "email_verification":
+            return None
+        return payload
+    except JWTError:
+        return None
+
+
 # ── Google ID token verify ───────────────────────────────────
 def verify_google_id_token(token: str) -> dict:
     if not GOOGLE_CLIENT_ID:

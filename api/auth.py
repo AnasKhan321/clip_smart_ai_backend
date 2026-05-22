@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
@@ -18,8 +18,11 @@ from auth import (
     verify_google_access_token,
     get_current_user,
     is_admin_email,
+    create_verification_token,
+    decode_verification_token,
 )
 from services.credits import grant, signup_bonus
+from services.email import send_verification_email
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -51,6 +54,7 @@ class UserOut(BaseModel):
     auth_provider: str
     credits: int
     is_admin: bool
+    is_email_verified: bool
     created_at: datetime
 
 
@@ -62,7 +66,7 @@ class AuthOut(BaseModel):
 
 # ── Endpoints ────────────────────────────────────────────────
 @router.post("/signup", response_model=AuthOut)
-def signup(payload: SignUpIn, db: Session = Depends(get_db)):
+def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     existing = db.query(User).filter(User.email == payload.email).first()
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
@@ -73,6 +77,7 @@ def signup(payload: SignUpIn, db: Session = Depends(get_db)):
         password_hash=hash_password(payload.password),
         auth_provider="local",
         is_admin=is_admin_email(payload.email),
+        is_email_verified=False,
         last_login_at=datetime.utcnow(),
     )
     db.add(user)
@@ -84,6 +89,10 @@ def signup(payload: SignUpIn, db: Session = Depends(get_db)):
 
     db.commit()
     db.refresh(user)
+
+    # Send verification email asynchronously
+    token = create_verification_token(user.email, user.id)
+    background_tasks.add_task(send_verification_email, user.email, user.name, token)
 
     return AuthOut(access_token=create_access_token(user.id), user=UserOut.model_validate(user))
 
@@ -143,6 +152,7 @@ def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
             user.name = info["name"]
         if is_admin_email(user.email) and not user.is_admin:
             user.is_admin = True
+        user.is_email_verified = True
     else:
         user = User(
             email=info["email"],
@@ -151,6 +161,7 @@ def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
             google_id=info["google_id"],
             auth_provider="google",
             is_admin=is_admin_email(info["email"]),
+            is_email_verified=True,
         )
         db.add(user)
         db.flush()
@@ -187,6 +198,7 @@ def dev_login(db: Session = Depends(get_db)):
             name="Dev User",
             auth_provider="dev",
             is_admin=True,
+            is_email_verified=True,
             last_login_at=datetime.utcnow(),
         )
         db.add(user)
@@ -197,6 +209,7 @@ def dev_login(db: Session = Depends(get_db)):
         db.commit()
         db.refresh(user)
     else:
+        user.is_email_verified = True
         user.last_login_at = datetime.utcnow()
         db.commit()
         db.refresh(user)
@@ -207,3 +220,29 @@ def dev_login(db: Session = Depends(get_db)):
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
     return UserOut.model_validate(user)
+
+
+@router.post("/verify-email", response_model=UserOut)
+def verify_email(token: str, db: Session = Depends(get_db)):
+    payload = decode_verification_token(token)
+    if not payload:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired verification token")
+    user_id = payload.get("sub")
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "User not found")
+    user.is_email_verified = True
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.post("/resend-verification")
+def resend_verification(background_tasks: BackgroundTasks, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    if user.is_email_verified:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Email already verified")
+    if user.auth_provider != "local":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only local auth accounts require email verification")
+    token = create_verification_token(user.email, user.id)
+    background_tasks.add_task(send_verification_email, user.email, user.name, token)
+    return {"message": "Verification email sent"}

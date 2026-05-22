@@ -25,6 +25,7 @@ class User(Base):
     is_admin = Column(Boolean, default=False, nullable=False)
 
     is_active = Column(Boolean, default=True)
+    is_email_verified = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     last_login_at = Column(DateTime, nullable=True)
 
