@@ -71,13 +71,14 @@ def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = D
     if existing:
         raise HTTPException(status.HTTP_409_CONFLICT, "Email already registered")
 
+    is_admin = is_admin_email(payload.email)
     user = User(
         email=payload.email,
         name=payload.name or payload.email.split("@")[0],
         password_hash=hash_password(payload.password),
         auth_provider="local",
-        is_admin=is_admin_email(payload.email),
-        is_email_verified=False,
+        is_admin=is_admin,
+        is_email_verified=is_admin,  # Admin emails are auto-verified
         last_login_at=datetime.utcnow(),
     )
     db.add(user)
@@ -90,9 +91,10 @@ def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = D
     db.commit()
     db.refresh(user)
 
-    # Send verification email asynchronously
-    token = create_verification_token(user.email, user.id)
-    background_tasks.add_task(send_verification_email, user.email, user.name, token)
+    # Send verification email asynchronously only if not auto-verified
+    if not user.is_email_verified:
+        token = create_verification_token(user.email, user.id)
+        background_tasks.add_task(send_verification_email, user.email, user.name, token)
 
     return AuthOut(access_token=create_access_token(user.id), user=UserOut.model_validate(user))
 
