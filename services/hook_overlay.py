@@ -6,6 +6,7 @@ shadow, multi-layer glow, rotation (sticker tilt), uppercase transform,
 letter-spacing.
 """
 import os
+import random
 import subprocess
 from pathlib import Path
 from typing import Tuple, List, Optional
@@ -272,16 +273,12 @@ HOOK_STYLES = {
         "font": FONT_INTER,
         "bg": (0, 0, 0, 245),
         "fg": (255, 255, 255, 255),
-        # Two-layer chromatic aberration: red shifted left, cyan shifted right
-        "glow": [
-            ((255, 0, 60, 230), 0, 4),
-            ((0, 220, 255, 230), 0, 4),
-        ],
         "corner_radius": 4,
         "padding_x": 30,
         "padding_y": 22,
         "uppercase": True,
         "letter_spacing_px": 2,
+        "glitch_effect": True,  # real post-process glitch applied after render
     },
     "memphis_pop": {
         "label": "Memphis",
@@ -355,6 +352,86 @@ def _draw_line_with_spacing(draw: ImageDraw.ImageDraw, xy: Tuple[int, int],
                   stroke_width=stroke_width, stroke_fill=stroke_fill)
         bb = draw.textbbox((0, 0), ch, font=font)
         x += (bb[2] - bb[0]) + letter_spacing
+
+
+def _apply_glitch_effect(img: Image.Image, seed: int) -> Image.Image:
+    """Real glitch distortion: RGB channel split + slice displacement + noise bars + scanlines."""
+    rng = random.Random(seed)
+    w, h = img.size
+
+    # 1. RGB channel split — separate R and B by opposite pixel offsets
+    r, g, b, a = img.split()
+    ch_shift = max(6, w // 80)  # scales with image width
+
+    r_shifted = Image.new("L", (w, h), 0)
+    r_shifted.paste(r, (ch_shift, 0))
+
+    b_shifted = Image.new("L", (w, h), 0)
+    b_shifted.paste(b, (-ch_shift, 0))
+
+    img = Image.merge("RGBA", (r_shifted, g, b_shifted, a))
+
+    # 2. Horizontal slice displacement — random bands shifted sideways
+    out = img.copy()
+    n_slices = rng.randint(5, 10)
+    for _ in range(n_slices):
+        y0 = rng.randint(0, h - 1)
+        sh = rng.randint(2, max(3, h // 10))
+        y1 = min(y0 + sh, h)
+        dx = rng.choice([-1, 1]) * rng.randint(6, 28)
+        band = img.crop((0, y0, w, y1))
+        bw, bh = band.size
+        new_band = Image.new("RGBA", (w, bh), (0, 0, 0, 0))
+        new_band.paste(band, (dx, 0))
+        # wrap the cropped-off edge back on the opposite side
+        if dx > 0:
+            wrap = band.crop((max(0, bw - dx), 0, bw, bh))
+            new_band.paste(wrap, (0, 0))
+        else:
+            wrap = band.crop((0, 0, min(bw, -dx), bh))
+            new_band.paste(wrap, (w + dx, 0))
+        out.paste(new_band, (0, y0))
+    img = out
+
+    # 3. Noise bars — colored horizontal corruption blocks
+    noise_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    nd = ImageDraw.Draw(noise_layer)
+    bar_colors = [
+        (255, 0, 60, 200),
+        (0, 220, 255, 200),
+        (255, 255, 255, 140),
+        (255, 0, 180, 160),
+    ]
+    for _ in range(rng.randint(3, 6)):
+        by = rng.randint(0, h - 3)
+        bh2 = rng.randint(1, 3)
+        bx = rng.randint(0, w // 2)
+        bw2 = rng.randint(w // 5, w - bx)
+        nd.rectangle([(bx, by), (bx + bw2, by + bh2)],
+                     fill=rng.choice(bar_colors))
+    img = Image.alpha_composite(img, noise_layer)
+
+    # 4. Scanlines — thin horizontal darkening every 4px (CRT/monitor feel)
+    scan_layer = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(scan_layer)
+    for y in range(0, h, 4):
+        sd.line([(0, y), (w - 1, y)], fill=(0, 0, 0, 50))
+    img = Image.alpha_composite(img, scan_layer)
+
+    # 5. Second thin channel-split echo — faint duplicate shifted further
+    echo_shift = ch_shift * 3
+    echo = img.copy().split()
+    r2 = Image.new("L", (w, h), 0)
+    r2.paste(echo[0], (echo_shift, rng.randint(-2, 2)))
+    faint = Image.merge("RGBA", (r2, Image.new("L", (w, h), 0),
+                                  Image.new("L", (w, h), 0), echo[3]))
+    # reduce opacity
+    faint_arr = faint.split()
+    alpha_faint = faint_arr[3].point(lambda p: int(p * 0.25))
+    faint = Image.merge("RGBA", (faint_arr[0], faint_arr[1], faint_arr[2], alpha_faint))
+    img = Image.alpha_composite(img, faint)
+
+    return img
 
 
 def create_hook_image(
@@ -589,6 +666,11 @@ def create_hook_image(
         new_w = max(1, img.size[0] // SUPER)
         new_h = max(1, img.size[1] // SUPER)
         img = img.resize((new_w, new_h), Image.LANCZOS)
+
+    # Real glitch distortion — applied after downscale so pixel shifts are at
+    # final resolution (1px slice = 1px on screen, not 2px from supersampling).
+    if cfg.get("glitch_effect"):
+        img = _apply_glitch_effect(img, seed=hash(text) & 0xFFFFFF)
 
     img.save(output_path)
     return output_path, img.size[0], img.size[1]
