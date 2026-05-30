@@ -328,7 +328,9 @@ def _line_text_width(draw: ImageDraw.ImageDraw, text: str,
                      font: ImageFont.FreeTypeFont, letter_spacing: int) -> int:
     if not text:
         return 0
-    if letter_spacing <= 0:
+    # Devanagari requires ligature shaping — char-by-char breaks glyphs, so
+    # always measure as a single string regardless of letter_spacing setting.
+    if letter_spacing <= 0 or _has_devanagari(text):
         bb = draw.textbbox((0, 0), text, font=font)
         return bb[2] - bb[0]
     total = 0
@@ -342,7 +344,9 @@ def _draw_line_with_spacing(draw: ImageDraw.ImageDraw, xy: Tuple[int, int],
                             text: str, font: ImageFont.FreeTypeFont,
                             fill, stroke_width: int = 0, stroke_fill=None,
                             letter_spacing: int = 0) -> None:
-    if letter_spacing <= 0:
+    # Devanagari requires ligature shaping — char-by-char rendering destroys
+    # matra attachment and conjunct consonants. Fall back to full-string draw.
+    if letter_spacing <= 0 or _has_devanagari(text):
         draw.text(xy, text, font=font, fill=fill,
                   stroke_width=stroke_width, stroke_fill=stroke_fill)
         return
