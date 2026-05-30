@@ -1,6 +1,7 @@
 import os
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from celery import Celery
+from celery.schedules import crontab
 from dotenv import load_dotenv
 #anas is gay
 load_dotenv()
@@ -22,7 +23,7 @@ celery = Celery(
     "clipforge",
     broker=REDIS_URL,
     backend=REDIS_URL,
-    include=["tasks.pipeline"],
+    include=["tasks.pipeline", "tasks.cleanup"],
 )
 
 celery.conf.update(
@@ -40,4 +41,10 @@ celery.conf.update(
     # Give long pipelines enough graceful-shutdown time. SIGTERM → worker
     # finishes current task within this window before SIGKILL.
     worker_shutdown_timeout=120,
+    beat_schedule={
+        "cleanup-expired-clips": {
+            "task": "cleanup_expired_free_clips",
+            "schedule": crontab(hour=2, minute=0),  # Daily at 2 AM UTC
+        },
+    },
 )

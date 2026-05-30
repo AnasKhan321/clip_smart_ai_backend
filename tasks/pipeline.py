@@ -248,6 +248,7 @@ def _insert_candidate_clips(db, job_id: str, candidates: list,
             hook_line=candidate.get("hook_line"),
             tags=tags,
             status="pending",
+            credit_type="free",
         )
         db.add(clip)
         new_rows.append(clip)

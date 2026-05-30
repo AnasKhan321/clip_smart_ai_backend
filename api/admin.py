@@ -9,7 +9,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User, CreditTransaction, AdminLog, Job
+from models import User, CreditTransaction, AdminLog, Job, Clip
 from auth import require_admin, create_access_token
 from services.credits import grant, log_admin, is_dev_mode
 
@@ -226,3 +226,41 @@ def list_logs(
 ):
     logs = db.query(AdminLog).order_by(AdminLog.created_at.desc()).limit(limit).all()
     return [AdminLogOut.model_validate(l) for l in logs]
+
+
+class PreserveFreeClipsIn(BaseModel):
+    user_email: EmailStr
+
+
+class PreserveFreeClipsOut(BaseModel):
+    user_email: str
+    clips_converted: int
+
+
+@router.post("/preserve-clips", response_model=PreserveFreeClipsOut)
+def preserve_free_clips(
+    payload: PreserveFreeClipsIn,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    """Convert user's free clips to paid, exempting them from expiry deletion."""
+    target = db.query(User).filter(func.lower(User.email) == payload.user_email.lower()).first()
+    if not target:
+        raise HTTPException(404, f"No user with email {payload.user_email}")
+
+    free_clips = db.query(Clip).join(Job, Clip.job_id == Job.id).filter(
+        Job.user_id == target.id,
+        Clip.credit_type == "free",
+    ).all()
+
+    for clip in free_clips:
+        clip.credit_type = "paid"
+
+    log_admin(
+        db, admin_user, "preserve_clips",
+        target_type="user", target_id=target.id, target_email=target.email,
+        payload={"clips_converted": len(free_clips)},
+    )
+
+    db.commit()
+    return PreserveFreeClipsOut(user_email=target.email, clips_converted=len(free_clips))

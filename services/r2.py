@@ -214,6 +214,15 @@ def head_size(key: str) -> int:
     return int(get_client().head_object(Bucket=bucket(), Key=key)["ContentLength"])
 
 
+def delete_object(key: str) -> None:
+    """Delete single object from R2."""
+    try:
+        get_client().delete_object(Bucket=bucket(), Key=key)
+    except ClientError as e:
+        if e.response["Error"]["Code"] != "NoSuchKey":
+            raise
+
+
 def delete_prefix(prefix: str) -> int:
     """Delete all keys under a prefix. Returns count."""
     cli = get_client()

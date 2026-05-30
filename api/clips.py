@@ -493,3 +493,27 @@ def download_clip(
         media_type="video/mp4",
         filename=f"clip_{clip.rank:03d}.mp4",
     )
+
+
+@router.get("/clips/{clip_id}/expiry-info")
+def get_clip_expiry_info(
+    clip_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    from datetime import datetime, timedelta
+    clip = _owned_clip(clip_id, db, user)
+
+    if clip.credit_type != "free":
+        return {"credit_type": clip.credit_type, "days_left": None, "is_expired": False}
+
+    expiry_date = clip.created_at + timedelta(days=3)
+    days_left = (expiry_date - datetime.utcnow()).days
+    is_expired = days_left < 0
+
+    return {
+        "credit_type": clip.credit_type,
+        "days_left": max(0, days_left),
+        "is_expired": is_expired,
+        "expiry_date": expiry_date,
+    }

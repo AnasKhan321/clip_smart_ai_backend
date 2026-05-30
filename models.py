@@ -135,6 +135,8 @@ class Clip(Base):
 
     error_message = Column(String, nullable=True)
 
+    credit_type = Column(String, default="free", nullable=False)  # "free" | "paid"
+
     created_at = Column(DateTime, default=datetime.utcnow)
 
     job = relationship("Job", back_populates="clips")

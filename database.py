@@ -50,6 +50,7 @@ _PENDING_COLUMNS = [
     ("jobs", "r2_source_key", "VARCHAR"),
     ("clips", "r2_clip_key", "VARCHAR"),
     ("users", "is_email_verified", "BOOLEAN DEFAULT FALSE"),
+    ("clips", "credit_type", "VARCHAR DEFAULT 'free'"),
 ]
 
 
