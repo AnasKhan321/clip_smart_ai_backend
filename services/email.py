@@ -11,7 +11,7 @@ SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USERNAME = os.getenv("SMTP_USERNAME", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "").strip()
-SMTP_SENDER = os.getenv("SMTP_SENDER", SMTP_USERNAME or "no-reply@clipforge.com").strip()
+SMTP_SENDER = os.getenv("SMTP_SENDER", SMTP_USERNAME or "noreply@vibeclip.in").strip()
 SMTP_USE_TLS = os.getenv("SMTP_USE_TLS", "true").lower() in ("true", "1", "yes")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:5173").rstrip("/")
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "").strip()
@@ -19,33 +19,42 @@ RESEND_SENDER = os.getenv("RESEND_SENDER", "").strip()
 
 def send_verification_email(email: str, name: str, token: str):
     verification_link = f"{FRONTEND_URL}/verify-email?token={token}"
-    subject = "Verify your email for ClipForge"
-    
+    subject = "Verify your email for VibeClip"
+
     html_content = f"""
     <html>
-      <body style="font-family: Arial, sans-serif; background-color: #0d0e12; color: #e2e8f0; padding: 30px; margin: 0;">
-        <div style="max-width: 500px; margin: 0 auto; background-color: #161920; border: 1px solid #2d3139; border-radius: 16px; padding: 32px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3);">
-          <div style="text-align: center; margin-bottom: 24px;">
-            <span style="font-size: 24px; font-weight: 900; color: #a78bfa; letter-spacing: 0.5px;">ClipForge</span>
+      <body style="font-family: Arial, sans-serif; background-color: #0a0f14; color: #e2e8f0; padding: 30px; margin: 0;">
+        <div style="max-width: 500px; margin: 0 auto; background-color: #0d1520; border: 1px solid #1a2d3d; border-radius: 16px; padding: 32px; box-shadow: 0 10px 40px -5px rgba(6, 182, 212, 0.08);">
+
+          <!-- Logo -->
+          <div style="text-align: center; margin-bottom: 28px;">
+            <span style="font-size: 26px; font-weight: 900; background: linear-gradient(135deg, #22d3ee 0%, #06b6d4 50%, #0891b2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; letter-spacing: 0.5px;">VibeClip</span>
           </div>
-          <h2 style="font-size: 20px; font-weight: 700; margin-top: 0; margin-bottom: 8px; color: #ffffff;">Verify your email address</h2>
-          <p style="font-size: 14px; line-height: 20px; color: #94a3b8; margin-bottom: 24px;">
+
+          <!-- Divider -->
+          <div style="height: 1px; background: linear-gradient(90deg, transparent, #06b6d4, transparent); margin-bottom: 28px;"></div>
+
+          <h2 style="font-size: 20px; font-weight: 700; margin-top: 0; margin-bottom: 10px; color: #f1f5f9;">Verify your email address</h2>
+          <p style="font-size: 14px; line-height: 22px; color: #94a3b8; margin-bottom: 28px;">
             Hi {name},<br><br>
-            Welcome to ClipForge! Please verify your email address to unlock your account and start creating viral clips.
+            Welcome to VibeClip! Verify your email address to unlock your account and start creating viral clips.
           </p>
-          <div style="text-align: center; margin-bottom: 24px;">
-            <a href="{verification_link}" style="display: inline-block; background-color: #7c3aed; color: #ffffff; font-weight: 600; font-size: 14px; text-decoration: none; padding: 12px 28px; border-radius: 8px; box-shadow: 0 4px 6px -1px rgba(124, 58, 237, 0.4);">
+
+          <!-- CTA Button -->
+          <div style="text-align: center; margin-bottom: 28px;">
+            <a href="{verification_link}" style="display: inline-block; background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%); color: #ffffff; font-weight: 700; font-size: 14px; text-decoration: none; padding: 13px 32px; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(6, 182, 212, 0.45); letter-spacing: 0.3px;">
               Verify Email Address
             </a>
           </div>
-          <p style="font-size: 12px; line-height: 18px; color: #64748b; margin-bottom: 16px;">
-            Or copy and paste this link into your browser:
-            <br>
-            <a href="{verification_link}" style="color: #a78bfa; text-decoration: underline;">{verification_link}</a>
+
+          <p style="font-size: 12px; line-height: 18px; color: #475569; margin-bottom: 20px;">
+            Or copy and paste this link:<br>
+            <a href="{verification_link}" style="color: #22d3ee; text-decoration: underline; word-break: break-all;">{verification_link}</a>
           </p>
-          <hr style="border: 0; border-top: 1px solid #2d3139; margin-bottom: 16px;">
-          <p style="font-size: 11px; line-height: 16px; color: #475569; margin: 0; text-align: center;">
-            This link will expire in 24 hours. If you did not sign up for this account, you can safely ignore this email.
+
+          <hr style="border: 0; border-top: 1px solid #1a2d3d; margin-bottom: 16px;">
+          <p style="font-size: 11px; line-height: 16px; color: #334155; margin: 0; text-align: center;">
+            Link expires in 24 hours. If you didn't sign up, ignore this email.
           </p>
         </div>
       </body>
@@ -57,8 +66,8 @@ def send_verification_email(email: str, name: str, token: str):
         try:
             import httpx
             resend_sender = RESEND_SENDER or SMTP_SENDER
-            if not resend_sender or "@gmail.com" in resend_sender.lower() or "no-reply@clipforge.com" in resend_sender.lower():
-                resend_sender = "ClipForge <onboarding@resend.dev>"
+            if not resend_sender or "@gmail.com" in resend_sender.lower():
+                resend_sender = "VibeClip <noreply@vibeclip.in>"
 
             resp = httpx.post(
                 "https://api.resend.com/emails",
