@@ -78,7 +78,7 @@ def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = D
         password_hash=hash_password(payload.password),
         auth_provider="local",
         is_admin=is_admin,
-        is_email_verified=True,  # Set to True to temporarily bypass verification requirements
+        is_email_verified=False,
         last_login_at=datetime.utcnow(),
     )
     db.add(user)
@@ -91,10 +91,9 @@ def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = D
     db.commit()
     db.refresh(user)
 
-    # Verification temporarily bypassed
-    # if not user.is_email_verified:
-    #     token = create_verification_token(user.email, user.id)
-    #     background_tasks.add_task(send_verification_email, user.email, user.name, token)
+    if not user.is_email_verified:
+        token = create_verification_token(user.email, user.id)
+        background_tasks.add_task(send_verification_email, user.email, user.name, token)
 
     return AuthOut(access_token=create_access_token(user.id), user=UserOut.model_validate(user))
 
