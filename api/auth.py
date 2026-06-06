@@ -82,6 +82,9 @@ def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = D
         last_login_at=datetime.utcnow(),
     )
     db.add(user)
+    if is_admin_email(user.email):
+        user.is_email_verified = True
+
     db.flush()
 
     bonus = signup_bonus()
