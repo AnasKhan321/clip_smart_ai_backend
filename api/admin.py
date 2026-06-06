@@ -75,7 +75,12 @@ class AdminLogOut(BaseModel):
 class StatsOut(BaseModel):
     total_users: int
     total_jobs: int
+    active_jobs: int
+    failed_jobs: int
+    total_clips: int
+    total_exports: int
     total_credits_outstanding: int
+    total_credits_spent: int
     dev_mode: bool
 
 
@@ -133,10 +138,19 @@ def admin_unlock(payload: UnlockIn, db: Session = Depends(get_db)):
     return UnlockOut(access_token=create_access_token(user.id), user=user_out)
 @router.get("/stats", response_model=StatsOut)
 def stats(db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
+    active_statuses = ["pending", "downloading", "transcribing", "diarizing", "analyzing", "clipping", "exporting"]
+    total_credits_spent = db.query(func.coalesce(func.sum(func.abs(CreditTransaction.amount)), 0)).filter(
+        CreditTransaction.amount < 0
+    ).scalar() or 0
     return StatsOut(
         total_users=db.query(func.count(User.id)).scalar() or 0,
         total_jobs=db.query(func.count(Job.id)).scalar() or 0,
+        active_jobs=db.query(func.count(Job.id)).filter(Job.status.in_(active_statuses)).scalar() or 0,
+        failed_jobs=db.query(func.count(Job.id)).filter(Job.status == "failed").scalar() or 0,
+        total_clips=db.query(func.count(Clip.id)).scalar() or 0,
+        total_exports=db.query(func.count(Clip.id)).filter(Clip.status == "ready").scalar() or 0,
         total_credits_outstanding=db.query(func.coalesce(func.sum(User.credits), 0)).scalar() or 0,
+        total_credits_spent=total_credits_spent,
         dev_mode=is_dev_mode(),
     )
 
