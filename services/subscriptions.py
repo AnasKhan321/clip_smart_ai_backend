@@ -3,21 +3,12 @@ import os
 import logging
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+import razorpay
 
 from database import SessionLocal
 from models import SubscriptionTier, UserSubscription, User, CreditTransaction
-import razorpay
 
 logger = logging.getLogger(__name__)
-
-
-def get_razorpay_client() -> razorpay.Client:
-    """Get Razorpay client instance."""
-    key_id = os.getenv("RAZORPAY_KEY_ID")
-    key_secret = os.getenv("RAZORPAY_KEY_SECRET")
-    if not key_id or not key_secret:
-        raise ValueError("RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set")
-    return razorpay.Client(auth=(key_id, key_secret))
 
 
 def calculate_credits(base_credits: int, bonus_percent: int) -> int:
@@ -33,58 +24,55 @@ def get_subscription_tier(db: Session, tier_id: int) -> SubscriptionTier:
     return tier
 
 
-def create_razorpay_plan(tier: SubscriptionTier) -> str:
-    """Create recurring plan in Razorpay, return plan_id."""
-    client = get_razorpay_client()
-    plan_data = {
-        "period": "monthly",
-        "interval": 1,
-        "amount": tier.price_paise,
-        "currency": "INR",
-        "description": f"{tier.display_name} Plan - {tier.total_credits} credits/month",
-    }
-    try:
-        plan = client.plan.create(data=plan_data)
-        logger.info(f"Created Razorpay plan {plan['id']} for tier {tier.id}")
-        return plan["id"]
-    except Exception as e:
-        logger.error(f"Failed to create Razorpay plan: {str(e)}")
-        raise
+def get_razorpay_client() -> razorpay.Client:
+    """Get Razorpay client instance."""
+    key_id = os.getenv("RAZORPAY_KEY_ID")
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+    if not key_id or not key_secret:
+        raise ValueError("RAZORPAY_KEY_ID or RAZORPAY_KEY_SECRET not set")
+    return razorpay.Client(auth=(key_id, key_secret))
 
 
 def create_razorpay_subscription(
     db: Session, user: User, tier: SubscriptionTier
 ) -> tuple[str, str]:
-    """Create subscription in Razorpay.
+    """Create subscription in Razorpay: Plan (with inline item) → Subscription.
 
     Returns: (subscription_id, plan_id)
     """
     client = get_razorpay_client()
 
-    # Create or reuse plan
-    if tier.razorpay_plan_id:
-        plan_id = tier.razorpay_plan_id
-    else:
-        plan_id = create_razorpay_plan(tier)
-        tier.razorpay_plan_id = plan_id
-        db.add(tier)
-        db.commit()
-
-    # Create subscription
-    sub_data = {
-        "plan_id": plan_id,
-        "customer_notify": 1,  # Email customer
-        "quantity": 1,
-        "total_count": 12,  # 12 months (user can cancel anytime)
-    }
-
     try:
+        # Step 1: Create Plan with inline item object
+        plan_data = {
+            "period": "monthly",
+            "interval": 1,
+            "item": {
+                "name": tier.display_name,
+                "amount": tier.price_paise,
+                "currency": "INR",
+            },
+        }
+        logger.info(f"Creating Razorpay plan for {tier.display_name}")
+        plan = client.plan.create(data=plan_data)
+        plan_id = plan["id"]
+        logger.info(f"✓ Created Razorpay plan {plan_id}")
+
+        # Step 2: Create Subscription using the plan
+        sub_data = {
+            "plan_id": plan_id,
+            "customer_notify": 1,
+            "quantity": 1,
+            "total_count": 12,
+        }
+        logger.info(f"Creating Razorpay subscription with plan {plan_id}")
         subscription = client.subscription.create(data=sub_data)
-        logger.info(f"Created Razorpay subscription {subscription['id']} for user {user.id}")
+        logger.info(f"✓ Created Razorpay subscription {subscription['id']}")
         return subscription["id"], plan_id
+
     except Exception as e:
-        logger.error(f"Failed to create Razorpay subscription: {str(e)}")
-        raise
+        logger.error(f"Razorpay API error: {str(e)}")
+        raise Exception(f"Failed to create subscription: {str(e)}")
 
 
 def create_user_subscription(

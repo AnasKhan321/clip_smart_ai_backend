@@ -259,14 +259,7 @@ def verify_topup_payment(
 ) -> VerifyPaymentOut:
     """Verify top-up payment & add to topup_credits_balance."""
     try:
-        # Verify payment
-        result = verify_payment(
-            razorpay_order_id=req.razorpay_order_id,
-            razorpay_payment_id=req.razorpay_payment_id,
-            razorpay_signature=req.razorpay_signature,
-        )
-
-        # Get payment to find credits
+        # Get payment first to validate payment_type
         payment = db.query(Payment).filter(
             Payment.razorpay_order_id == req.razorpay_order_id
         ).first()
@@ -274,14 +267,22 @@ def verify_topup_payment(
         if not payment or payment.user_id != current_user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Payment does not belong to current user"
+                detail="Payment not found or does not belong to user"
             )
 
-        # Add to topup_credits_balance (not regular credits)
-        current_user.topup_credits_balance += payment.credits_granted
+        # Validate payment_type to prevent order routing between flows
+        if payment.payment_type != "topup":
+            raise ValueError(f"Payment is {payment.payment_type}, not topup")
 
-        # Mark payment as topup
-        payment.payment_type = "topup"
+        # Verify payment signature & amount
+        result = verify_payment(
+            razorpay_order_id=req.razorpay_order_id,
+            razorpay_payment_id=req.razorpay_payment_id,
+            razorpay_signature=req.razorpay_signature,
+        )
+
+        # Add to topup_credits_balance (separate from subscription credits)
+        current_user.topup_credits_balance += payment.credits_granted
         db.add(current_user)
         db.add(payment)
         db.commit()

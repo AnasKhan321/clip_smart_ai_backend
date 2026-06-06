@@ -7,6 +7,7 @@ import logging
 from database import get_db
 from models import User, SubscriptionTier, UserSubscription
 from auth import get_current_user
+from api.payments import CreatePaymentOut
 from services.subscriptions import (
     get_subscription_tier,
     create_razorpay_subscription,
@@ -15,7 +16,7 @@ from services.subscriptions import (
     pause_subscription,
     resume_subscription,
     get_user_subscription,
-    get_credit_breakdown,
+    get_credit_breakdown as get_credit_breakdown_service,
     upgrade_subscription,
     addon_subscription,
 )
@@ -158,7 +159,7 @@ def get_credit_breakdown(
     db: Session = Depends(get_db),
 ) -> CreditBreakdownOut:
     """Get credit balance breakdown (subscription + topup + admin)."""
-    breakdown = get_credit_breakdown(db, current_user)
+    breakdown = get_credit_breakdown_service(db, current_user)
     return CreditBreakdownOut(**breakdown)
 
 
@@ -255,26 +256,48 @@ def resume_current_subscription(
         )
 
 
-@router.post("/upgrade", response_model=SubscriptionOut)
+@router.post("/upgrade", response_model=CreatePaymentOut)
 def upgrade_to_tier(
     req: CreateSubscriptionIn,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> SubscriptionOut:
-    """Upgrade to higher tier: cancel old cycle, start new one with full credits."""
+) -> CreatePaymentOut:
+    """Upgrade to higher tier: create Razorpay order for tier price difference.
+
+    Only credits on webhook verification (subscription.charged).
+    """
     try:
         new_tier = get_subscription_tier(db, req.tier_id)
-        subscription = upgrade_subscription(db, current_user, new_tier)
+        old_subscription = db.query(UserSubscription).filter(
+            UserSubscription.user_id == current_user.id,
+            UserSubscription.status == "active",
+        ).first()
 
-        return SubscriptionOut(
-            subscription_id=subscription.id,
-            tier_name=new_tier.display_name,
-            status=subscription.status,
-            next_billing_date=subscription.next_billing_date.isoformat(),
-            current_period_end=subscription.current_period_end.isoformat(),
-            subscription_credits_balance=subscription.subscription_credits_balance,
-            price_paise=new_tier.price_paise,
+        if not old_subscription:
+            raise ValueError("No active subscription to upgrade")
+
+        old_tier = old_subscription.tier
+
+        if new_tier.price_paise <= old_tier.price_paise:
+            raise ValueError("Can only upgrade to higher tier")
+
+        # Create Razorpay order for upgrade amount
+        upgrade_amount = new_tier.price_paise - old_tier.price_paise
+        from services.razorpay import create_order
+
+        order_data = create_order(
+            user_id=current_user.id,
+            amount_paise=upgrade_amount,
+            credits=0,  # Credits credited only after webhook
         )
+
+        # Mark old subscription as pending upgrade
+        old_subscription.status = "pending_upgrade"
+        db.add(old_subscription)
+        db.commit()
+
+        return CreatePaymentOut(**order_data)
+
     except ValueError as e:
         logger.warning(f"Upgrade failed: {str(e)}")
         raise HTTPException(
@@ -285,30 +308,49 @@ def upgrade_to_tier(
         logger.error(f"Upgrade error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to upgrade subscription",
+            detail="Failed to create upgrade order",
         )
 
 
-@router.post("/addon", response_model=SubscriptionOut)
+@router.post("/addon", response_model=CreatePaymentOut)
 def addon_to_current_tier(
     req: CreateSubscriptionIn,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
-) -> SubscriptionOut:
-    """Add another month to current tier: extend cycle + add full credits."""
+) -> CreatePaymentOut:
+    """Add another month: create Razorpay order for tier price.
+
+    Only extends cycle & credits on webhook verification.
+    """
     try:
         tier = get_subscription_tier(db, req.tier_id)
-        subscription = addon_subscription(db, current_user, tier)
+        subscription = db.query(UserSubscription).filter(
+            UserSubscription.user_id == current_user.id,
+            UserSubscription.status == "active",
+        ).first()
 
-        return SubscriptionOut(
-            subscription_id=subscription.id,
-            tier_name=tier.display_name,
-            status=subscription.status,
-            next_billing_date=subscription.next_billing_date.isoformat(),
-            current_period_end=subscription.current_period_end.isoformat(),
-            subscription_credits_balance=subscription.subscription_credits_balance,
-            price_paise=tier.price_paise,
+        if not subscription:
+            raise ValueError("No active subscription")
+
+        if tier.id != subscription.tier.id:
+            raise ValueError("Addon must match current tier")
+
+        # Create Razorpay order for addon
+        from services.razorpay import create_order
+
+        order_data = create_order(
+            user_id=current_user.id,
+            amount_paise=tier.price_paise,
+            credits=0,  # Credits credited only after webhook
         )
+
+        # Mark as pending addon
+        subscription.status = "pending_addon"
+        db.add(subscription)
+        db.commit()
+
+        return CreatePaymentOut(**order_data)
+
     except ValueError as e:
         logger.warning(f"Addon failed: {str(e)}")
         raise HTTPException(
@@ -319,5 +361,5 @@ def addon_to_current_tier(
         logger.error(f"Addon error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to add subscription month",
+            detail="Failed to create addon order",
         )
