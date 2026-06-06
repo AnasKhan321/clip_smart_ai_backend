@@ -188,6 +188,53 @@ def encoder_audio_opts() -> list[str]:
     return ["-c:a", "aac", "-b:a", "192k"]
 
 
+def build_audio_mix_filter_complex(
+    music_volume: float = 0.5,
+    music_fade_in: float = 0,
+    music_fade_out: float = 0,
+    music_trim_start: float = 0,
+    music_trim_end: float = 0,
+    clip_duration: float = 0,
+) -> str:
+    """Build FFmpeg filter_complex for mixing original audio + music track.
+
+    Input 0: video (with original audio)
+    Input 1: music file
+    Output: single audio stream [audio] ready for mapping
+
+    Apply in order: trim → fade_in → fade_out → volume → amix
+    """
+    filters = []
+
+    music_filter_chain = "[1:a]"
+
+    # Trim music (atrim: start=X:end=Y)
+    if music_trim_start > 0 or music_trim_end > 0:
+        trim_start = max(0, music_trim_start)
+        trim_end = f":{music_trim_end}" if music_trim_end > 0 else ""
+        filters.append(f"{music_filter_chain}atrim=start={trim_start}{trim_end}[trimmed]")
+        music_filter_chain = "[trimmed]"
+
+    # Fade in (only applies if not trimmed)
+    if music_fade_in > 0:
+        filters.append(f"{music_filter_chain}afade=t=in:d={music_fade_in}[fade_in]")
+        music_filter_chain = "[fade_in]"
+
+    # Fade out
+    if music_fade_out > 0:
+        fade_out_start = max(0, clip_duration - music_fade_out)
+        filters.append(f"{music_filter_chain}afade=t=out:st={fade_out_start}:d={music_fade_out}[fade_out]")
+        music_filter_chain = "[fade_out]"
+
+    # Volume
+    filters.append(f"{music_filter_chain}volume={music_volume}[music]")
+
+    # Mix with original
+    filters.append("[0:a][music]amix=inputs=2:duration=first[audio]")
+
+    return ";".join(filters)
+
+
 def media_tools_status() -> dict:
     status = {}
     for name, resolver in (("ffmpeg", ffmpeg_path), ("ffprobe", ffprobe_path)):

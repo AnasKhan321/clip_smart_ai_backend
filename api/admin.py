@@ -1,9 +1,12 @@
 """Admin endpoints. All require User.is_admin == True."""
+import csv
+import io
 import os
 from datetime import datetime
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
@@ -278,3 +281,89 @@ def preserve_free_clips(
 
     db.commit()
     return PreserveFreeClipsOut(user_email=target.email, clips_converted=len(free_clips))
+
+
+def _csv_response(filename: str, rows: list[dict], fieldnames: list[str]) -> StreamingResponse:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    writer.writerows(rows)
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/export/users.csv")
+def export_users_csv(db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
+    users = db.query(User).order_by(User.created_at.desc()).all()
+    job_counts = dict(
+        db.query(Job.user_id, func.count(Job.id))
+        .filter(Job.user_id.isnot(None))
+        .group_by(Job.user_id)
+        .all()
+    )
+    rows = [
+        {
+            "id": u.id,
+            "email": u.email,
+            "name": u.name or "",
+            "auth_provider": u.auth_provider,
+            "credits": u.credits,
+            "jobs": job_counts.get(u.id, 0),
+            "is_admin": u.is_admin,
+            "is_active": u.is_active,
+            "created_at": u.created_at.isoformat() if u.created_at else "",
+            "last_login_at": u.last_login_at.isoformat() if u.last_login_at else "",
+        }
+        for u in users
+    ]
+    fields = ["id", "email", "name", "auth_provider", "credits", "jobs", "is_admin", "is_active", "created_at", "last_login_at"]
+    return _csv_response("users.csv", rows, fields)
+
+
+@router.get("/export/jobs.csv")
+def export_jobs_csv(db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
+    jobs = db.query(Job, User.email).join(User, Job.user_id == User.id, isouter=True).order_by(Job.created_at.desc()).all()
+    rows = [
+        {
+            "id": j.id,
+            "user_email": email or "",
+            "status": j.status,
+            "source_type": getattr(j, "source_type", ""),
+            "source_url": getattr(j, "source_url", "") or "",
+            "video_duration_seconds": getattr(j, "video_duration_seconds", "") or "",
+            "created_at": j.created_at.isoformat() if j.created_at else "",
+            "completed_at": j.completed_at.isoformat() if getattr(j, "completed_at", None) else "",
+        }
+        for j, email in jobs
+    ]
+    fields = ["id", "user_email", "status", "source_type", "source_url", "video_duration_seconds", "created_at", "completed_at"]
+    return _csv_response("jobs.csv", rows, fields)
+
+
+@router.get("/export/transactions.csv")
+def export_transactions_csv(db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
+    rows_raw = (
+        db.query(CreditTransaction, User.email)
+        .join(User, CreditTransaction.user_id == User.id)
+        .order_by(CreditTransaction.created_at.desc())
+        .all()
+    )
+    rows = [
+        {
+            "id": t.id,
+            "user_email": email,
+            "kind": t.kind,
+            "amount": t.amount,
+            "balance_after": t.balance_after,
+            "job_id": t.job_id or "",
+            "note": t.note or "",
+            "created_at": t.created_at.isoformat() if t.created_at else "",
+        }
+        for t, email in rows_raw
+    ]
+    fields = ["id", "user_email", "kind", "amount", "balance_after", "job_id", "note", "created_at"]
+    return _csv_response("transactions.csv", rows, fields)

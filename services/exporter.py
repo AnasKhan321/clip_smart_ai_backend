@@ -1,12 +1,15 @@
 import os
 import shutil
 import logging
+import subprocess
+import re
 from pathlib import Path
 from typing import Optional
 
 from services.editor import render_and_caption_clip
 from services.transcriber import load_transcript
 from services import r2
+from services.media_tools import ffmpeg_path, encoder_audio_opts, build_audio_mix_filter_complex
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +58,102 @@ def _ensure_local_source(job_id: str) -> Path:
     )
 
 
+def _fetch_music_file(music_track_id: str) -> str:
+    """Download music file from R2, return local path.
+
+    Validates music_track_id to prevent path traversal attacks.
+    """
+    if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', music_track_id):
+        raise ValueError(f"Invalid music_track_id: must be alphanumeric/dash/underscore, max 64 chars")
+
+    if not r2.is_enabled():
+        raise ValueError("R2 storage not configured")
+
+    storage = os.getenv("STORAGE_PATH", "./storage")
+    music_dir = Path(storage) / "music"
+    music_dir.mkdir(parents=True, exist_ok=True)
+
+    local_path = music_dir / f"{music_track_id}.mp3"
+
+    # Verify path is within music_dir (prevent traversal)
+    resolved_path = local_path.resolve()
+    resolved_music_dir = music_dir.resolve()
+    if not str(resolved_path).startswith(str(resolved_music_dir) + os.sep):
+        raise ValueError("Path traversal attempt detected")
+
+    if local_path.exists() and local_path.stat().st_size > 0:
+        return str(local_path)
+
+    r2_key = f"music/{music_track_id}.mp3"
+    if not r2.object_exists(r2_key):
+        raise FileNotFoundError(f"Music track not found in R2: {r2_key}")
+
+    r2.download_file(r2_key, str(local_path))
+    return str(local_path)
+
+
+def _mix_audio_and_reencode(
+    video_path: str,
+    music_path: str,
+    music_volume: float,
+    music_fade_in: float,
+    music_fade_out: float,
+    music_trim_start: float = 0,
+    music_trim_end: float = 0,
+    clip_duration: float = 0,
+) -> str:
+    """Mix original audio from video with music track using FFmpeg.
+
+    Args:
+        video_path: Path to video file (with original audio)
+        music_path: Path to music MP3 file
+        music_volume: Volume multiplier for music (0-1)
+        music_fade_in: Fade in duration in seconds
+        music_fade_out: Fade out duration in seconds
+        music_trim_start: Trim music from start (seconds)
+        music_trim_end: Trim music to end (seconds, 0 = full duration)
+        clip_duration: Duration of clip in seconds (for fade_out calculation)
+
+    Returns:
+        Path to output MP4 with mixed audio
+    """
+    output_path = str(Path(video_path).parent / f"{Path(video_path).stem}_mixed.mp4")
+
+    filter_complex = build_audio_mix_filter_complex(
+        music_volume=music_volume,
+        music_fade_in=music_fade_in,
+        music_fade_out=music_fade_out,
+        music_trim_start=music_trim_start,
+        music_trim_end=music_trim_end,
+        clip_duration=clip_duration,
+    )
+
+    cmd = [
+        ffmpeg_path(),
+        "-y",
+        "-i", video_path,
+        "-i", music_path,
+        "-filter_complex", filter_complex,
+        "-map", "0:v",
+        "-map", "[audio]",
+        "-c:v", "copy",
+        *encoder_audio_opts(),
+        output_path,
+    ]
+
+    logger.info("mixing audio: cmd=%s", " ".join(cmd[:5]))
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+    except subprocess.CalledProcessError as exc:
+        logger.error("audio mix failed: stdout=%s stderr=%s", exc.stdout, exc.stderr)
+        raise RuntimeError(f"Audio mixing failed: {exc.stderr.decode()[:500]}") from exc
+
+    if not Path(output_path).exists() or Path(output_path).stat().st_size < 1024:
+        raise RuntimeError(f"Audio mix produced empty file: {output_path}")
+
+    return output_path
+
+
 def export_clip(job_id: str, clip: dict, options: dict) -> str:
     aspect_ratio = options.get("aspect_ratio", "9:16")
     include_captions = options.get("include_captions", True)
@@ -66,6 +165,13 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     hook_font_scale = float(options.get("hook_font_scale", 1.0))
     hook_style = options.get("hook_style", "serif_card")
     hook_y_pct = options.get("hook_y_pct")
+    music_enabled = options.get("music_enabled", False)
+    music_track_id = options.get("music_track_id")
+    music_volume = float(options.get("music_volume", 0.5))
+    music_fade_in = float(options.get("music_fade_in", 0))
+    music_fade_out = float(options.get("music_fade_out", 0))
+    music_trim_start = float(options.get("music_trim_start", 0))
+    music_trim_end = float(options.get("music_trim_end", 0))
     # Focus modes (face/speaker) only make sense when re-framing to vertical.
     # For 16:9 / 1:1 they'd run heavy track computation (face detection on
     # the entire source) for no benefit — the filter chain ignores them.
@@ -187,7 +293,30 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         except OSError:
             pass
 
-    shutil.copy(result["final_clip_path"], export_path)
+    # Mix audio if music enabled
+    final_video_path = result["final_clip_path"]
+    if music_enabled and music_track_id:
+        try:
+            music_file = _fetch_music_file(music_track_id)
+            clip_duration = (clip.get("user_end_seconds") or clip["end_seconds"]) - \
+                           (clip.get("user_start_seconds") or clip["start_seconds"])
+            final_video_path = _mix_audio_and_reencode(
+                final_video_path,
+                music_file,
+                music_volume=music_volume,
+                music_fade_in=music_fade_in,
+                music_fade_out=music_fade_out,
+                music_trim_start=music_trim_start,
+                music_trim_end=music_trim_end,
+                clip_duration=float(clip_duration),
+            )
+            logger.info("audio mixed: clip=%s volume=%s fade_in=%s fade_out=%s trim=%s-%s",
+                        clip.get("rank"), music_volume, music_fade_in, music_fade_out,
+                        music_trim_start, music_trim_end)
+        except Exception as exc:
+            logger.warning("audio mixing failed (continuing without music): %s", exc)
+
+    shutil.copy(final_video_path, export_path)
 
     if not Path(export_path).exists() or Path(export_path).stat().st_size < 1024:
         raise RuntimeError(f"Export produced empty or missing file: {export_path}")

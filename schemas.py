@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Optional, List
+import re
 from pydantic import BaseModel, ConfigDict, field_validator
 
 
@@ -89,3 +90,19 @@ class ExportRequest(BaseModel):
     hook_font_scale: float = 1.0
     hook_style: str = "serif_card"
     hook_y_pct: Optional[float] = None  # 0-100, overrides hook_position when set
+    music_enabled: bool = False
+    music_track_id: Optional[str] = None
+    music_volume: float = 0.5  # 0-1
+    music_fade_in: float = 0  # seconds
+    music_fade_out: float = 0  # seconds
+    music_trim_start: float = 0  # seconds
+    music_trim_end: float = 0  # seconds (0 = use full duration)
+
+    @field_validator('music_track_id')
+    @classmethod
+    def validate_music_track_id(cls, v):
+        if v is None:
+            return v
+        if not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', v):
+            raise ValueError('music_track_id must be alphanumeric/dash/underscore, max 64 chars')
+        return v

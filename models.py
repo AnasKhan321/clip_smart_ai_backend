@@ -140,3 +140,16 @@ class Clip(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     job = relationship("Job", back_populates="clips")
+
+
+class MusicTrack(Base):
+    __tablename__ = "music_tracks"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    filename = Column(String, nullable=False)
+    duration = Column(Float, nullable=False)
+    r2_key = Column(String, nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+    user = relationship("User")

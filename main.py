@@ -9,6 +9,7 @@ from api.jobs import router as jobs_router
 from api.clips import router as clips_router
 from api.auth import router as auth_router
 from api.admin import router as admin_router
+from api.music import router as music_router
 from api.debug import router as debug_router
 
 load_dotenv()
@@ -100,4 +101,5 @@ app.include_router(auth_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(clips_router, prefix="/api")
+app.include_router(music_router, prefix="/api")
 app.include_router(debug_router, prefix="/api")
