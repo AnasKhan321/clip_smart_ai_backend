@@ -28,10 +28,14 @@ def create_order(user_id: str, amount_paise: int, credits: int) -> dict:
     """Create Razorpay order. Returns order data with order_id, key_id."""
     client = get_razorpay_client()
 
+    # Receipt must be <= 40 chars; use timestamp hash
+    timestamp = int(datetime.utcnow().timestamp() * 1000)
+    receipt = f"ord_{timestamp % 1000000}"  # Max 14 chars
+
     order_data = {
         "amount": amount_paise,
         "currency": "INR",
-        "receipt": f"order_{user_id}_{datetime.utcnow().timestamp()}",
+        "receipt": receipt,
     }
 
     try:
