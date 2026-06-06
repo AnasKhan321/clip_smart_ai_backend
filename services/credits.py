@@ -49,18 +49,43 @@ def _record_txn(
 
 
 def deduct(db: Session, user: User, amount: int, job_id: Optional[str] = None, note: Optional[str] = None) -> CreditTransaction:
-    """Take credits. In dev mode, no-op success. In prod, raises 402 if short."""
+    """Take credits (subscription first, then topup). Dev mode bypasses checks."""
     if is_dev_mode():
         return _record_txn(db, user, "deduct", -amount, user.credits, job_id, note=f"[DEV bypass] {note or ''}")
 
-    if user.credits < amount:
+    # Import here to avoid circular dependency
+    from models import UserSubscription
+
+    # Check total available (subscription + topup)
+    subscription = db.query(UserSubscription).filter(
+        UserSubscription.user_id == user.id,
+        UserSubscription.status.in_(["active", "pending"]),
+    ).first()
+
+    sub_credits = subscription.subscription_credits_balance if subscription else 0
+    topup_credits = user.topup_credits_balance
+    total_available = sub_credits + topup_credits
+
+    if total_available < amount:
         raise HTTPException(
             status_code=402,
-            detail=f"Insufficient credits: need {amount}, have {user.credits}. Ask an admin for a top-up.",
+            detail=f"Insufficient credits: need {amount}, have {total_available} (subscription: {sub_credits}, topup: {topup_credits}). Buy more credits.",
         )
 
-    user.credits -= amount
-    return _record_txn(db, user, "deduct", -amount, user.credits, job_id, note)
+    # Deduct from subscription first, then topup
+    if sub_credits >= amount:
+        subscription.subscription_credits_balance -= amount
+        source = "subscription"
+    else:
+        need_from_topup = amount - sub_credits
+        subscription.subscription_credits_balance = 0
+        user.topup_credits_balance -= need_from_topup
+        source = "mixed"
+
+    if subscription:
+        db.add(subscription)
+    db.add(user)
+    return _record_txn(db, user, "deduct", -amount, total_available - amount, job_id, note)
 
 
 def refund(db: Session, user: User, amount: int, job_id: Optional[str] = None, note: Optional[str] = None) -> CreditTransaction:

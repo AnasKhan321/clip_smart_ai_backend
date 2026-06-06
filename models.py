@@ -23,6 +23,8 @@ class User(Base):
     # Credits + admin
     credits = Column(Integer, default=0, nullable=False)
     is_admin = Column(Boolean, default=False, nullable=False)
+    topup_credits_balance = Column(Integer, default=0, nullable=False)
+    subscription_tier_id = Column(Integer, nullable=True)
 
     is_active = Column(Boolean, default=True)
     is_email_verified = Column(Boolean, default=False, nullable=False)
@@ -31,6 +33,7 @@ class User(Base):
 
     jobs = relationship("Job", back_populates="user", cascade="all, delete-orphan")
     credit_txns = relationship("CreditTransaction", back_populates="user", cascade="all, delete-orphan")
+    subscription = relationship("UserSubscription", back_populates="user", cascade="all, delete-orphan", uselist=False)
 
 
 class CreditTransaction(Base):
@@ -140,6 +143,79 @@ class Clip(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     job = relationship("Job", back_populates="clips")
+
+
+class SubscriptionTier(Base):
+    __tablename__ = "subscription_tiers"
+
+    id = Column(Integer, primary_key=True)
+    tier_name = Column(String, unique=True, nullable=False)  # "starter" | "pro" | "professional" | "enterprise"
+    display_name = Column(String, nullable=False)  # "Starter" | "Pro" | "Professional" | "Enterprise"
+    price_paise = Column(Integer, nullable=False)  # ₹999 = 99900 paise
+
+    base_credits = Column(Integer, nullable=False)  # 10, 20, 30, 100
+    bonus_percent = Column(Integer, nullable=False)  # 10, 15, 20, 50
+    total_credits = Column(Integer, nullable=False)  # calculated: base + (base * bonus / 100)
+
+    max_clips_per_job = Column(Integer, nullable=True)  # null = unlimited
+    max_videos_per_month = Column(Integer, nullable=True)
+    export_quality = Column(String, nullable=True)  # "sd" | "hd" | "4k"
+    features = Column(Text, nullable=True)  # JSON: { "batch_processing": true, ... }
+
+    billing_period = Column(String, default="monthly", nullable=False)  # "monthly" | "annual"
+    razorpay_plan_id = Column(String, nullable=True, unique=True)
+
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class UserSubscription(Base):
+    __tablename__ = "user_subscriptions"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True, unique=True)
+    subscription_tier_id = Column(Integer, ForeignKey("subscription_tiers.id"), nullable=False)
+
+    razorpay_subscription_id = Column(String, unique=True, nullable=False, index=True)
+    razorpay_plan_id = Column(String, nullable=False)
+
+    status = Column(String, default="active", index=True)  # "active" | "paused" | "canceled" | "past_due"
+    current_period_start = Column(DateTime, nullable=False)
+    current_period_end = Column(DateTime, nullable=False)
+    next_billing_date = Column(DateTime, nullable=False)
+
+    subscription_credits_balance = Column(Integer, default=0, nullable=False)
+    subscription_credits_used = Column(Integer, default=0, nullable=False)
+
+    is_renewing = Column(Boolean, default=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=lambda: datetime.utcnow())
+    canceled_at = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="subscription")
+    tier = relationship("SubscriptionTier")
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    razorpay_order_id = Column(String, unique=True, nullable=False, index=True)
+    razorpay_payment_id = Column(String, nullable=True, index=True)
+    razorpay_signature = Column(String, nullable=True)
+
+    amount_paise = Column(Integer, nullable=False)  # amount in paise (₹100 = 10000 paise)
+    credits_granted = Column(Integer, nullable=False)
+    status = Column(String, default="pending", index=True)  # pending, success, failed
+    payment_type = Column(String, default="topup", nullable=False)  # "topup" | "subscription_initial"
+    subscription_id = Column(String, nullable=True, index=True)  # FK to user_subscriptions.id if tied to subscription
+
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    verified_at = Column(DateTime, nullable=True)
+
+    user = relationship("User")
 
 
 class MusicTrack(Base):

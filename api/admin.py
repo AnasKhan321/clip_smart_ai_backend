@@ -12,7 +12,7 @@ from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User, CreditTransaction, AdminLog, Job, Clip
+from models import User, CreditTransaction, AdminLog, Job, Clip, SubscriptionTier, UserSubscription
 from auth import require_admin, create_access_token
 from services.credits import grant, log_admin, is_dev_mode
 
@@ -367,3 +367,198 @@ def export_transactions_csv(db: Session = Depends(get_db), _admin: User = Depend
     ]
     fields = ["id", "user_email", "kind", "amount", "balance_after", "job_id", "note", "created_at"]
     return _csv_response("transactions.csv", rows, fields)
+
+
+# ── Subscription Management ──────────────────────────────────
+class CreateSubscriptionTierIn(BaseModel):
+    tier_name: str = Field(min_length=3, max_length=50)
+    display_name: str = Field(min_length=3, max_length=50)
+    price_paise: int = Field(gt=0)
+    base_credits: int = Field(gt=0)
+    bonus_percent: int = Field(ge=0, le=100)
+    billing_period: str = "monthly"
+
+
+class SubscriptionTierOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    tier_name: str
+    display_name: str
+    price_paise: int
+    base_credits: int
+    bonus_percent: int
+    total_credits: int
+    is_active: bool
+
+
+class UserSubscriptionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    subscription_tier_id: int
+    status: str
+    current_period_start: datetime
+    current_period_end: datetime
+    next_billing_date: datetime
+    subscription_credits_balance: int
+    created_at: datetime
+
+
+class ManualGrantIn(BaseModel):
+    tier_id: int = Field(gt=0)
+    days: int = Field(gt=0, le=365, description="Number of days to grant")
+
+
+@router.post("/tiers", response_model=SubscriptionTierOut)
+def create_subscription_tier(
+    req: CreateSubscriptionTierIn,
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> SubscriptionTierOut:
+    """Create new subscription tier (admin only)."""
+    from services.subscriptions import calculate_credits
+
+    # Check if tier already exists
+    existing = db.query(SubscriptionTier).filter(
+        SubscriptionTier.tier_name == req.tier_name
+    ).first()
+
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Tier '{req.tier_name}' already exists"
+        )
+
+    total_credits = calculate_credits(req.base_credits, req.bonus_percent)
+
+    tier = SubscriptionTier(
+        tier_name=req.tier_name,
+        display_name=req.display_name,
+        price_paise=req.price_paise,
+        base_credits=req.base_credits,
+        bonus_percent=req.bonus_percent,
+        total_credits=total_credits,
+        billing_period=req.billing_period,
+        is_active=True,
+    )
+
+    db.add(tier)
+    db.commit()
+    db.refresh(tier)
+
+    return SubscriptionTierOut.model_validate(tier)
+
+
+@router.get("/subscriptions", response_model=list[UserSubscriptionOut])
+def get_user_subscriptions(
+    user_email: str = Query(...),
+    _: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> list[UserSubscriptionOut]:
+    """Get all subscriptions for a user (admin only)."""
+    user = db.query(User).filter(User.email == user_email).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_email} not found"
+        )
+
+    subscriptions = db.query(UserSubscription).filter(
+        UserSubscription.user_id == user.id
+    ).all()
+
+    return [UserSubscriptionOut.model_validate(s) for s in subscriptions]
+
+
+@router.post("/subscriptions/{user_id}/manual-grant", response_model=UserSubscriptionOut)
+def grant_subscription_manually(
+    user_id: str,
+    req: ManualGrantIn,
+    admin: User = Depends(require_admin),
+    db: Session = Depends(get_db),
+) -> UserSubscriptionOut:
+    """Manually grant subscription to user for N days (admin only)."""
+    from datetime import timedelta as td
+
+    user = db.query(User).filter(User.id == user_id).first()
+
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found"
+        )
+
+    tier = db.query(SubscriptionTier).filter(
+        SubscriptionTier.id == req.tier_id
+    ).first()
+
+    if not tier:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Tier {req.tier_id} not found"
+        )
+
+    # Check if user already has active subscription
+    existing = db.query(UserSubscription).filter(
+        UserSubscription.user_id == user_id,
+        UserSubscription.status == "active",
+    ).first()
+
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="User already has active subscription"
+        )
+
+    # Create manual subscription (no Razorpay ID, use placeholder)
+    now = datetime.utcnow()
+    period_end = now + td(days=req.days)
+
+    subscription = UserSubscription(
+        user_id=user_id,
+        subscription_tier_id=tier.id,
+        razorpay_subscription_id=f"manual_{user_id}_{datetime.utcnow().timestamp()}",
+        razorpay_plan_id="manual",
+        status="active",
+        current_period_start=now,
+        current_period_end=period_end,
+        next_billing_date=period_end,
+        subscription_credits_balance=tier.total_credits,
+        subscription_credits_used=0,
+        is_renewing=False,  # Don't auto-renew manual grants
+    )
+
+    # Grant credits
+    txn = CreditTransaction(
+        user_id=user_id,
+        kind="subscription_grant",
+        amount=tier.total_credits,
+        balance_after=user.credits + tier.total_credits,
+        note=f"Manual grant by {admin.email}: {tier.display_name} ({req.days} days)",
+    )
+
+    db.add(subscription)
+    db.add(txn)
+
+    log_admin(
+        db,
+        admin,
+        "grant_subscription",
+        target_type="user",
+        target_id=user_id,
+        target_email=user.email,
+        payload={
+            "tier_id": req.tier_id,
+            "tier_name": tier.display_name,
+            "days": req.days,
+            "credits": tier.total_credits,
+        },
+    )
+
+    db.commit()
+    db.refresh(subscription)
+
+    return UserSubscriptionOut.model_validate(subscription)

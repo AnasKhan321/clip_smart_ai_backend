@@ -11,6 +11,8 @@ from api.auth import router as auth_router
 from api.admin import router as admin_router
 from api.music import router as music_router
 from api.debug import router as debug_router
+from api.payments import router as payments_router
+from api.subscriptions import router as subscriptions_router
 
 load_dotenv()
 
@@ -31,6 +33,8 @@ async def lifespan(app: FastAPI):
     # Reset any "exporting" clips left over from a prior worker crash. Without
     # this they stay stuck forever and the frontend polls until timeout.
     _reset_stale_exports()
+    # Seed subscription tiers
+    _seed_subscription_tiers()
     yield
 
 
@@ -72,6 +76,23 @@ def _reset_stale_exports() -> None:
         s.close()
 
 
+def _seed_subscription_tiers() -> None:
+    """Seed 4 subscription tiers on startup (idempotent)."""
+    import logging
+    from database import SessionLocal
+    from services.subscriptions import seed_subscription_tiers
+
+    logger = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        seed_subscription_tiers(db)
+        logger.info("Subscription tiers seeded")
+    except Exception as exc:
+        logger.exception("Failed to seed subscription tiers: %s", exc)
+    finally:
+        db.close()
+
+
 app = FastAPI(title="ClipForge API", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
@@ -102,4 +123,6 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(clips_router, prefix="/api")
 app.include_router(music_router, prefix="/api")
+app.include_router(payments_router, prefix="/api")
+app.include_router(subscriptions_router, prefix="/api")
 app.include_router(debug_router, prefix="/api")
