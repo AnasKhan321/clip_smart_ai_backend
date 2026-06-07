@@ -80,7 +80,8 @@ def deduct(db: Session, user: User, amount: int, job_id: Optional[str] = None, n
         source = "subscription"
     else:
         need_from_topup = amount - sub_credits
-        subscription.subscription_credits_balance = 0
+        if subscription:
+            subscription.subscription_credits_balance = 0
         user.topup_credits_balance -= need_from_topup
         source = "mixed"
 
