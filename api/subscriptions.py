@@ -1,4 +1,5 @@
 """Subscription endpoints: /tiers, /create, /current, /cancel, /pause, /resume."""
+import os
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
@@ -53,6 +54,8 @@ class SubscriptionOut(BaseModel):
     current_period_end: str
     subscription_credits_balance: int
     price_paise: int
+    razorpay_subscription_id: str | None = None
+    razorpay_key_id: str | None = None
 
 
 class SubscriptionActionOut(BaseModel):
@@ -60,13 +63,19 @@ class SubscriptionActionOut(BaseModel):
     message: str
 
 
+class VerifySubscriptionIn(BaseModel):
+    razorpay_subscription_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+
+
 class CreditBreakdownOut(BaseModel):
     subscription_credits: int
-    subscription_tier: str = None
-    subscription_status: str = None  # active | pending
+    subscription_tier: str | None = None
+    subscription_status: str | None = None  # active | pending
     topup_credits: int
     total: int
-    next_billing_date: str = None
+    next_billing_date: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -85,20 +94,76 @@ def create_subscription(
 ) -> SubscriptionOut:
     """Create a new subscription (pending payment verification)."""
     try:
+        # Get tier
+        tier = get_subscription_tier(db, req.tier_id)
+
         # Check if user already has active/pending subscription
         existing = db.query(UserSubscription).filter(
             UserSubscription.user_id == current_user.id,
             UserSubscription.status.in_(["active", "pending"]),
         ).first()
 
-        if existing:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="User already has an active subscription. Cancel current subscription first.",
-            )
+        if existing and existing.status == "pending":
+            db.delete(existing)
+            db.commit()
+            existing = None
 
-        # Get tier
-        tier = get_subscription_tier(db, req.tier_id)
+        if existing:
+            # If the requested tier is higher (more expensive) than current subscription, treat as upgrade
+            if tier.price_paise > existing.tier.price_paise:
+                subscription = upgrade_subscription(db, current_user, tier)
+                return SubscriptionOut(
+                    subscription_id=subscription.id,
+                    tier_name=tier.display_name,
+                    status=subscription.status,
+                    next_billing_date=subscription.next_billing_date.isoformat(),
+                    current_period_end=subscription.current_period_end.isoformat(),
+                    subscription_credits_balance=subscription.subscription_credits_balance,
+                    price_paise=tier.price_paise,
+                )
+            elif tier.price_paise == existing.tier.price_paise:
+                # Same tier: treat as addon (extends billing period by 30 days + adds credits)
+                subscription = addon_subscription(db, current_user, tier)
+                return SubscriptionOut(
+                    subscription_id=subscription.id,
+                    tier_name=existing.tier.display_name,
+                    status=subscription.status,
+                    next_billing_date=subscription.next_billing_date.isoformat(),
+                    current_period_end=subscription.current_period_end.isoformat(),
+                    subscription_credits_balance=subscription.subscription_credits_balance,
+                    price_paise=existing.tier.price_paise,
+                )
+            else:
+                # Lower tier: keep current tier active, but grant credits of the lower tier
+                existing.subscription_credits_balance += tier.total_credits
+                
+                # Update user.credits
+                current_user.credits = existing.subscription_credits_balance + current_user.topup_credits_balance
+
+                # Log transaction
+                from models import CreditTransaction
+                txn = CreditTransaction(
+                    user_id=current_user.id,
+                    kind="subscription_addon",
+                    amount=tier.total_credits,
+                    balance_after=current_user.credits,
+                    note=f"Granted {tier.display_name} credits to existing {existing.tier.display_name} subscription",
+                )
+                db.add(existing)
+                db.add(current_user)
+                db.add(txn)
+                db.commit()
+                db.refresh(existing)
+                
+                return SubscriptionOut(
+                    subscription_id=existing.id,
+                    tier_name=existing.tier.display_name,
+                    status=existing.status,
+                    next_billing_date=existing.next_billing_date.isoformat(),
+                    current_period_end=existing.current_period_end.isoformat(),
+                    subscription_credits_balance=existing.subscription_credits_balance,
+                    price_paise=existing.tier.price_paise,
+                )
 
         # Create Razorpay subscription
         razorpay_subscription_id, razorpay_plan_id = create_razorpay_subscription(db, current_user, tier)
@@ -120,8 +185,12 @@ def create_subscription(
             current_period_end=subscription.current_period_end.isoformat(),
             subscription_credits_balance=subscription.subscription_credits_balance,
             price_paise=tier.price_paise,
+            razorpay_subscription_id=subscription.razorpay_subscription_id,
+            razorpay_key_id=os.getenv("RAZORPAY_KEY_ID"),
         )
 
+    except HTTPException as e:
+        raise e
     except ValueError as e:
         logger.warning(f"Subscription creation failed: {str(e)}")
         raise HTTPException(
@@ -163,6 +232,78 @@ def get_credit_breakdown(
     return CreditBreakdownOut(**breakdown)
 
 
+@router.post("/verify", response_model=SubscriptionActionOut)
+def verify_subscription(
+    req: VerifySubscriptionIn,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> SubscriptionActionOut:
+    """Verify subscription payment signature and activate it immediately."""
+    import hmac
+    import hashlib
+
+    key_secret = os.getenv("RAZORPAY_KEY_SECRET")
+    if not key_secret:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Razorpay secret not configured",
+        )
+
+    # Verify signature
+    data = f"{req.razorpay_payment_id}|{req.razorpay_subscription_id}"
+    expected_signature = hmac.new(
+        key_secret.encode(),
+        data.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+    if not hmac.compare_digest(expected_signature, req.razorpay_signature):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid payment signature",
+        )
+
+    # Get user subscription record
+    subscription = db.query(UserSubscription).filter(
+        UserSubscription.razorpay_subscription_id == req.razorpay_subscription_id,
+        UserSubscription.user_id == current_user.id
+    ).first()
+
+    if not subscription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subscription record not found",
+        )
+
+    # Activate subscription
+    if subscription.status == "pending":
+        subscription.status = "active"
+        tier = subscription.tier
+        subscription.subscription_credits_balance = tier.total_credits
+
+        # Update user.credits
+        current_user.credits = subscription.subscription_credits_balance + current_user.topup_credits_balance
+
+        # Log credit transaction
+        from models import CreditTransaction
+        txn = CreditTransaction(
+            user_id=current_user.id,
+            kind="subscription_grant",
+            amount=tier.total_credits,
+            balance_after=current_user.credits,
+            note=f"Subscription verified: {tier.display_name}",
+        )
+        db.add(subscription)
+        db.add(current_user)
+        db.add(txn)
+        db.commit()
+
+    return SubscriptionActionOut(
+        status="active",
+        message="Subscription successfully verified and activated",
+    )
+
+
 @router.post("/cancel", response_model=SubscriptionActionOut)
 def cancel_current_subscription(
     current_user: User = Depends(get_current_user),
@@ -171,13 +312,13 @@ def cancel_current_subscription(
     """Cancel current subscription (effective end of current period)."""
     subscription = db.query(UserSubscription).filter(
         UserSubscription.user_id == current_user.id,
-        UserSubscription.status == "active",
+        UserSubscription.status.in_(["active", "pending"]),
     ).first()
 
     if not subscription:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="No active subscription to cancel",
+            detail="No active or pending subscription to cancel",
         )
 
     try:

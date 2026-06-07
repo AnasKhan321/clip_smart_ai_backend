@@ -5,6 +5,7 @@ import json
 import logging
 from datetime import datetime
 import razorpay
+from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Payment, User, CreditTransaction
 
@@ -70,7 +71,7 @@ def create_order(user_id: str, amount_paise: int, credits: int) -> dict:
         raise
 
 
-def verify_payment(razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str) -> dict:
+def verify_payment(razorpay_order_id: str, razorpay_payment_id: str, razorpay_signature: str, db: Session | None = None) -> dict:
     """Verify payment signature. If valid, credit user and return success."""
     key_secret = os.getenv("RAZORPAY_KEY_SECRET")
 
@@ -87,7 +88,10 @@ def verify_payment(razorpay_order_id: str, razorpay_payment_id: str, razorpay_si
         raise ValueError("Invalid payment signature")
 
     # Get payment record
-    db = SessionLocal()
+    is_local_session = False
+    if db is None:
+        db = SessionLocal()
+        is_local_session = True
     try:
         payment = db.query(Payment).filter(
             Payment.razorpay_order_id == razorpay_order_id
@@ -113,7 +117,17 @@ def verify_payment(razorpay_order_id: str, razorpay_payment_id: str, razorpay_si
             logger.error(f"User not found: {payment.user_id}")
             raise ValueError("User not found")
 
-        user.credits += payment.credits_granted
+        if payment.payment_type == "topup":
+            user.topup_credits_balance += payment.credits_granted
+
+        # Recalculate user.credits
+        from models import UserSubscription
+        subscription = db.query(UserSubscription).filter(
+            UserSubscription.user_id == user.id,
+            (UserSubscription.status.in_(["active", "pending"])) |
+            (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+        ).order_by(UserSubscription.created_at.desc()).first()
+        user.credits = (subscription.subscription_credits_balance if subscription else 0) + user.topup_credits_balance
 
         # Log transaction
         txn = CreditTransaction(
@@ -125,18 +139,21 @@ def verify_payment(razorpay_order_id: str, razorpay_payment_id: str, razorpay_si
         )
 
         db.add(txn)
-        db.commit()
-        db.refresh(payment)
+        if is_local_session:
+            db.commit()
+            db.refresh(payment)
 
         logger.info(f"Payment verified & credited {payment.credits_granted} credits to {payment.user_id}")
         return {"status": "success", "payment_id": payment.id}
 
     except Exception as e:
-        db.rollback()
+        if is_local_session:
+            db.rollback()
         logger.error(f"Failed to verify payment: {str(e)}")
         raise
     finally:
-        db.close()
+        if is_local_session:
+            db.close()
 
 
 def mark_payment_failed(razorpay_order_id: str) -> None:
@@ -193,7 +210,17 @@ def handle_webhook(payload: str, signature: str) -> None:
                 payment.verified_at = datetime.utcnow()
 
                 user = db.query(User).filter(User.id == payment.user_id).first()
-                user.credits += payment.credits_granted
+                if payment.payment_type == "topup":
+                    user.topup_credits_balance += payment.credits_granted
+
+                # Recalculate user.credits
+                from models import UserSubscription
+                subscription = db.query(UserSubscription).filter(
+                    UserSubscription.user_id == user.id,
+                    (UserSubscription.status.in_(["active", "pending"])) |
+                    (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+                ).order_by(UserSubscription.created_at.desc()).first()
+                user.credits = (subscription.subscription_credits_balance if subscription else 0) + user.topup_credits_balance
 
                 txn = CreditTransaction(
                     user_id=payment.user_id,
@@ -266,18 +293,21 @@ def handle_subscription_webhook(payload: str, signature: str) -> None:
 
                 # Grant credits
                 subscription.subscription_credits_balance = tier.total_credits
-                if subscription.status == "pending":
-                    subscription.status = "active"  # Activate on first successful charge
+                if subscription.status in ("pending", "past_due"):
+                    subscription.status = "active"  # Activate on first successful charge or recovery
                 from datetime import timedelta as td
                 subscription.current_period_start = datetime.utcnow()
                 subscription.current_period_end = datetime.utcnow() + td(days=30)
                 subscription.next_billing_date = datetime.utcnow() + td(days=30)
 
+                # Update user.credits
+                user.credits = subscription.subscription_credits_balance + user.topup_credits_balance
+
                 txn = CreditTransaction(
                     user_id=user.id,
                     kind="subscription_grant",
                     amount=tier.total_credits,
-                    balance_after=user.credits + tier.total_credits,
+                    balance_after=user.credits,
                     note=f"Subscription charged: {tier.display_name}",
                 )
 

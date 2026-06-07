@@ -56,11 +56,11 @@ class PaymentOut(BaseModel):
 
     id: str
     razorpay_order_id: str
-    razorpay_payment_id: str
+    razorpay_payment_id: str | None = None
     amount_paise: int
     credits_granted: int
     status: str
-    verified_at: str = None
+    verified_at: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -102,13 +102,6 @@ def verify_payment_endpoint(
 ) -> VerifyPaymentOut:
     """Verify payment signature & credit user. Called from frontend after Razorpay checkout."""
     try:
-        # Verify payment
-        result = verify_payment(
-            razorpay_order_id=req.razorpay_order_id,
-            razorpay_payment_id=req.razorpay_payment_id,
-            razorpay_signature=req.razorpay_signature,
-        )
-
         # Verify payment belongs to current user
         payment = db.query(Payment).filter(
             Payment.razorpay_order_id == req.razorpay_order_id
@@ -119,6 +112,15 @@ def verify_payment_endpoint(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Payment does not belong to current user"
             )
+
+        # Verify payment
+        result = verify_payment(
+            razorpay_order_id=req.razorpay_order_id,
+            razorpay_payment_id=req.razorpay_payment_id,
+            razorpay_signature=req.razorpay_signature,
+            db=db,
+        )
+        db.commit()
 
         return VerifyPaymentOut(
             status="success",
@@ -266,7 +268,7 @@ def verify_topup_payment(
 
         if not payment or payment.user_id != current_user.id:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
+                status_code=status.HTTP_404_NOT_FOUND,
                 detail="Payment not found or does not belong to user"
             )
 
@@ -279,12 +281,8 @@ def verify_topup_payment(
             razorpay_order_id=req.razorpay_order_id,
             razorpay_payment_id=req.razorpay_payment_id,
             razorpay_signature=req.razorpay_signature,
+            db=db,
         )
-
-        # Add to topup_credits_balance (separate from subscription credits)
-        current_user.topup_credits_balance += payment.credits_granted
-        db.add(current_user)
-        db.add(payment)
         db.commit()
 
         return VerifyPaymentOut(

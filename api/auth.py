@@ -56,6 +56,7 @@ class UserOut(BaseModel):
     is_admin: bool
     is_email_verified: bool
     created_at: datetime
+    subscription_tier_name: Optional[str] = None
 
 
 class AuthOut(BaseModel):

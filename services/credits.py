@@ -56,11 +56,13 @@ def deduct(db: Session, user: User, amount: int, job_id: Optional[str] = None, n
     # Import here to avoid circular dependency
     from models import UserSubscription
 
+    from datetime import datetime
     # Check total available (subscription + topup)
     subscription = db.query(UserSubscription).filter(
         UserSubscription.user_id == user.id,
-        UserSubscription.status.in_(["active", "pending"]),
-    ).first()
+        (UserSubscription.status.in_(["active", "pending"])) |
+        (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+    ).order_by(UserSubscription.created_at.desc()).first()
 
     sub_credits = subscription.subscription_credits_balance if subscription else 0
     topup_credits = user.topup_credits_balance
@@ -82,6 +84,8 @@ def deduct(db: Session, user: User, amount: int, job_id: Optional[str] = None, n
         user.topup_credits_balance -= need_from_topup
         source = "mixed"
 
+    user.credits = (subscription.subscription_credits_balance if subscription else 0) + user.topup_credits_balance
+
     if subscription:
         db.add(subscription)
     db.add(user)
@@ -93,7 +97,19 @@ def refund(db: Session, user: User, amount: int, job_id: Optional[str] = None, n
     if is_dev_mode():
         return _record_txn(db, user, "refund", amount, user.credits, job_id, note=f"[DEV bypass] {note or ''}")
 
-    user.credits += amount
+    user.topup_credits_balance += amount
+
+    # Recalculate user.credits
+    from models import UserSubscription
+    from datetime import datetime
+    subscription = db.query(UserSubscription).filter(
+        UserSubscription.user_id == user.id,
+        (UserSubscription.status.in_(["active", "pending"])) |
+        (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+    ).order_by(UserSubscription.created_at.desc()).first()
+    user.credits = (subscription.subscription_credits_balance if subscription else 0) + user.topup_credits_balance
+
+    db.add(user)
     return _record_txn(db, user, "refund", amount, user.credits, job_id, note)
 
 
@@ -105,7 +121,19 @@ def grant(
     note: Optional[str] = None,
 ) -> CreditTransaction:
     """Add credits (admin top-up or signup bonus)."""
-    user.credits += amount
+    user.topup_credits_balance += amount
+
+    # Recalculate user.credits
+    from models import UserSubscription
+    from datetime import datetime
+    subscription = db.query(UserSubscription).filter(
+        UserSubscription.user_id == user.id,
+        (UserSubscription.status.in_(["active", "pending"])) |
+        (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+    ).order_by(UserSubscription.created_at.desc()).first()
+    user.credits = (subscription.subscription_credits_balance if subscription else 0) + user.topup_credits_balance
+
+    db.add(user)
     return _record_txn(db, user, kind, amount, user.credits, note=note)
 
 

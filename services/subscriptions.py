@@ -136,15 +136,19 @@ def handle_subscription_renewal(razorpay_subscription_id: str) -> None:
         subscription.current_period_end = datetime.utcnow() + timedelta(days=30)
         subscription.next_billing_date = datetime.utcnow() + timedelta(days=30)
 
+        # Update user.credits
+        user.credits = subscription.subscription_credits_balance + user.topup_credits_balance
+
         txn = CreditTransaction(
             user_id=user.id,
             kind="subscription_grant",
             amount=tier.total_credits,
-            balance_after=user.credits + tier.total_credits,
+            balance_after=user.credits,
             note=f"Monthly renewal: {tier.display_name}",
         )
 
         db.add(subscription)
+        db.add(user)
         db.add(txn)
         db.commit()
 
@@ -162,11 +166,11 @@ def cancel_subscription(user_id: str) -> None:
     try:
         subscription = db.query(UserSubscription).filter(
             UserSubscription.user_id == user_id,
-            UserSubscription.status == "active",
+            UserSubscription.status.in_(["active", "pending"]),
         ).first()
 
         if not subscription:
-            logger.warning(f"No active subscription found for user {user_id}")
+            logger.warning(f"No active or pending subscription found for user {user_id}")
             return
 
         subscription.status = "canceled"
@@ -242,8 +246,9 @@ def get_user_subscription(db: Session, user_id: str) -> dict:
     """Get current subscription for user (if active or pending)."""
     subscription = db.query(UserSubscription).filter(
         UserSubscription.user_id == user_id,
-        UserSubscription.status.in_(["active", "pending"]),
-    ).first()
+        (UserSubscription.status.in_(["active", "pending"])) |
+        (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+    ).order_by(UserSubscription.created_at.desc()).first()
 
     if not subscription:
         return None
@@ -259,6 +264,8 @@ def get_user_subscription(db: Session, user_id: str) -> dict:
         "current_period_end": subscription.current_period_end.isoformat(),
         "subscription_credits_balance": subscription.subscription_credits_balance,
         "price_paise": tier.price_paise,
+        "razorpay_subscription_id": subscription.razorpay_subscription_id,
+        "razorpay_key_id": os.getenv("RAZORPAY_KEY_ID"),
     }
 
 
@@ -266,8 +273,9 @@ def get_credit_breakdown(db: Session, user: User) -> dict:
     """Get credit balance breakdown (subscription + topup + admin)."""
     subscription = db.query(UserSubscription).filter(
         UserSubscription.user_id == user.id,
-        UserSubscription.status.in_(["active", "pending"]),
-    ).first()
+        (UserSubscription.status.in_(["active", "pending"])) |
+        (UserSubscription.status.in_(["canceled", "paused"]) & (UserSubscription.current_period_end > datetime.utcnow()))
+    ).order_by(UserSubscription.created_at.desc()).first()
 
     sub_credits = subscription.subscription_credits_balance if subscription else 0
     topup_credits = user.topup_credits_balance
@@ -370,15 +378,20 @@ def upgrade_subscription(
         subscription_credits_used=0,
     )
 
+    # Update user.credits
+    user.credits = (new_tier.total_credits + old_unused_credits) + user.topup_credits_balance
+
     # Log upgrade transaction
     txn = CreditTransaction(
         user_id=user.id,
         kind="subscription_upgrade",
         amount=new_tier.total_credits,
-        balance_after=user.credits + new_tier.total_credits,
+        balance_after=user.credits,
         note=f"Upgraded from {old_tier.display_name} to {new_tier.display_name} + {old_unused_credits} old credits",
     )
 
+    user.subscription_tier_id = new_tier.id
+    db.add(user)
     db.add(old_subscription)
     db.add(new_subscription)
     db.add(txn)
@@ -422,16 +435,20 @@ def addon_subscription(
     # Add full tier credits
     subscription.subscription_credits_balance += tier.total_credits
 
+    # Update user.credits
+    user.credits = subscription.subscription_credits_balance + user.topup_credits_balance
+
     # Log addon transaction
     txn = CreditTransaction(
         user_id=user.id,
         kind="subscription_addon",
         amount=tier.total_credits,
-        balance_after=user.credits + tier.total_credits,
+        balance_after=user.credits,
         note=f"Added {tier.display_name} subscription extension",
     )
 
     db.add(subscription)
+    db.add(user)
     db.add(txn)
     db.commit()
     db.refresh(subscription)

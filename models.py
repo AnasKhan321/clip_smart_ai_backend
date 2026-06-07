@@ -33,7 +33,17 @@ class User(Base):
 
     jobs = relationship("Job", back_populates="user", cascade="all, delete-orphan")
     credit_txns = relationship("CreditTransaction", back_populates="user", cascade="all, delete-orphan")
-    subscription = relationship("UserSubscription", back_populates="user", cascade="all, delete-orphan", uselist=False)
+    subscriptions = relationship("UserSubscription", back_populates="user", cascade="all, delete-orphan")
+
+    @property
+    def subscription_tier_name(self) -> str | None:
+        """Returns the display name of the active/canceled-but-valid subscription tier."""
+        from datetime import datetime
+        active_sub = next(
+            (s for s in self.subscriptions if s.status == "active" or (s.status in ("canceled", "paused") and s.current_period_end > datetime.utcnow())),
+            None
+        )
+        return active_sub.tier.display_name if active_sub else None
 
 
 class CreditTransaction(Base):
@@ -173,7 +183,7 @@ class UserSubscription(Base):
     __tablename__ = "user_subscriptions"
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
-    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True, unique=True)
+    user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
     subscription_tier_id = Column(Integer, ForeignKey("subscription_tiers.id"), nullable=False)
 
     razorpay_subscription_id = Column(String, unique=True, nullable=False, index=True)
@@ -193,7 +203,7 @@ class UserSubscription(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=lambda: datetime.utcnow())
     canceled_at = Column(DateTime, nullable=True)
 
-    user = relationship("User", back_populates="subscription")
+    user = relationship("User", back_populates="subscriptions")
     tier = relationship("SubscriptionTier")
 
 
