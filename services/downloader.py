@@ -72,6 +72,7 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
         ytdlp_bin,
         "--proxy", proxy_url,
         "-f", "bestvideo+bestaudio/best",
+        "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
         "--get-url",
         "--no-warnings",
         source_url,
@@ -80,7 +81,12 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp --get-url exit {result.returncode}: {result.stderr.strip()[-300:]}")
 
-    cdn_urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip()]
+    lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    # --print outputs one info line, --get-url outputs CDN URLs. Split them.
+    cdn_urls = [l for l in lines if l.startswith("http")]
+    info_lines = [l for l in lines if not l.startswith("http")]
+    if info_lines:
+        print(f"[downloader] quality: {info_lines[0]}", flush=True)
     if not cdn_urls:
         raise RuntimeError("yt-dlp --get-url returned no URLs")
 
