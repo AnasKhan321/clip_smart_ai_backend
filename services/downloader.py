@@ -52,6 +52,24 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     return {**meta, "video_path": video_path_abs, "audio_path": str(audio_path)}
 
 
+def _write_cookies_tempfile() -> Optional[str]:
+    """Decode YTDLP_COOKIES_B64 env var → temp file. Returns path or None."""
+    import base64, tempfile
+    b64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
+    if not b64:
+        return None
+    try:
+        content = base64.b64decode(b64).decode("utf-8")
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
+        f.write(content)
+        f.flush()
+        f.close()
+        return f.name
+    except Exception as e:
+        print(f"[downloader] failed to decode YTDLP_COOKIES_B64: {e}", flush=True)
+        return None
+
+
 def _pick_proxy() -> str:
     """Pick a proxy URL from WEBSHARE_PROXY_LIST (comma-separated host:port entries)
     or fall back to single WEBSHARE_HOST/PORT. Rotates randomly across all entries."""
@@ -81,6 +99,9 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
 
     ytdlp_bin = shutil.which("yt-dlp") or "yt-dlp"
 
+    # Write cookies from env var to a temp file if available
+    cookie_file = _write_cookies_tempfile()
+
     cmd = [
         ytdlp_bin,
         "--proxy", proxy_url,
@@ -89,8 +110,10 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
         "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
         "--get-url",
         "--no-warnings",
-        source_url,
     ]
+    if cookie_file:
+        cmd += ["--cookies", cookie_file]
+    cmd.append(source_url)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp --get-url exit {result.returncode}: {result.stderr.strip()[-300:]}")
