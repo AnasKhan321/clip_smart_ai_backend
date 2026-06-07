@@ -51,6 +51,8 @@ _PENDING_COLUMNS = [
     ("clips", "r2_clip_key", "VARCHAR"),
     ("users", "is_email_verified", "BOOLEAN DEFAULT FALSE"),
     ("clips", "credit_type", "VARCHAR DEFAULT 'free'"),
+    ("users", "topup_credits_balance", "INTEGER DEFAULT 0"),
+    ("users", "subscription_tier_id", "INTEGER"),
 ]
 
 
