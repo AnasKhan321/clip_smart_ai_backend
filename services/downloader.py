@@ -105,7 +105,7 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
     cmd = [
         ytdlp_bin,
         "--proxy", proxy_url,
-        "-f", "bestvideo+bestaudio/best",
+        "-f", "bestvideo+bestaudio/bestvideo/best",
         "--extractor-args", "youtube:player_client=android,ios,web",
         "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
         "--get-url",
