@@ -495,16 +495,32 @@ def seed_subscription_tiers(db: Session) -> None:
     ]
 
     for config in tiers_config:
+        # Calculate base credits from price
+        base_credits = config["price_paise"] // credit_price_paise
+        total_credits = calculate_credits(base_credits, config["bonus_percent"])
+
         existing = db.query(SubscriptionTier).filter(
             SubscriptionTier.tier_name == config["tier_name"]
         ).first()
 
         if existing:
+            if (
+                existing.base_credits != base_credits
+                or existing.total_credits != total_credits
+                or existing.price_paise != config["price_paise"]
+                or existing.bonus_percent != config["bonus_percent"]
+                or existing.display_name != config["display_name"]
+            ):
+                existing.display_name = config["display_name"]
+                existing.price_paise = config["price_paise"]
+                existing.base_credits = base_credits
+                existing.bonus_percent = config["bonus_percent"]
+                existing.total_credits = total_credits
+                logger.info(
+                    f"Updated existing tier: {config['tier_name']} "
+                    f"({base_credits} base + {config['bonus_percent']}% = {total_credits} total credits)"
+                )
             continue
-
-        # Calculate base credits from price
-        base_credits = config["price_paise"] // credit_price_paise
-        total_credits = calculate_credits(base_credits, config["bonus_percent"])
 
         tier = SubscriptionTier(
             tier_name=config["tier_name"],
