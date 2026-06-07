@@ -52,19 +52,32 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     return {**meta, "video_path": video_path_abs, "audio_path": str(audio_path)}
 
 
-def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:
-    host = os.getenv("WEBSHARE_HOST", "")
-    port = os.getenv("WEBSHARE_PORT", "80")
+def _pick_proxy() -> str:
+    """Pick a proxy URL from WEBSHARE_PROXY_LIST (comma-separated host:port entries)
+    or fall back to single WEBSHARE_HOST/PORT. Rotates randomly across all entries."""
+    import random
     user = os.getenv("WEBSHARE_USER", "")
     pw = os.getenv("WEBSHARE_PASS", "")
 
-    if not host:
-        raise RuntimeError("WEBSHARE_HOST not set")
+    proxy_list = os.getenv("WEBSHARE_PROXY_LIST", "").strip()
+    if proxy_list:
+        entries = [e.strip() for e in proxy_list.split(",") if e.strip()]
+        host_port = random.choice(entries)
+    else:
+        host = os.getenv("WEBSHARE_HOST", "")
+        port = os.getenv("WEBSHARE_PORT", "80")
+        if not host:
+            raise RuntimeError("WEBSHARE_HOST not set")
+        host_port = f"{host}:{port}"
 
     if user and pw:
-        proxy_url = f"http://{user}:{pw}@{host}:{port}"
-    else:
-        proxy_url = f"http://{host}:{port}"
+        return f"http://{user}:{pw}@{host_port}"
+    return f"http://{host_port}"
+
+
+def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:
+    proxy_url = _pick_proxy()
+    print(f"[downloader] proxy: {proxy_url.split('@')[-1]}", flush=True)  # log host:port only
 
     ytdlp_bin = shutil.which("yt-dlp") or "yt-dlp"
 
@@ -72,6 +85,7 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
         ytdlp_bin,
         "--proxy", proxy_url,
         "-f", "bestvideo+bestaudio/best",
+        "--extractor-args", "youtube:player_client=android,ios,web",
         "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
         "--get-url",
         "--no-warnings",
