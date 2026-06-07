@@ -232,6 +232,15 @@ def get_credit_breakdown(
     return CreditBreakdownOut(**breakdown)
 
 
+@router.get("/config")
+def get_subscription_config():
+    """Get subscription config: credit price per rupee."""
+    credit_price_inr = float(os.getenv("CREDIT_PRICE_INR", "99.99"))
+    return {
+        "credit_price_inr": credit_price_inr,
+    }
+
+
 @router.post("/verify", response_model=SubscriptionActionOut)
 def verify_subscription(
     req: VerifySubscriptionIn,
