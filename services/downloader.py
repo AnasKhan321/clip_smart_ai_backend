@@ -94,17 +94,20 @@ def _pick_proxy() -> str:
 
 
 def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:
-    proxy_url = _pick_proxy()
-    print(f"[downloader] proxy: {proxy_url.split('@')[-1]}", flush=True)  # log host:port only
-
     ytdlp_bin = shutil.which("yt-dlp") or "yt-dlp"
-
-    # Write cookies from env var to a temp file if available
     cookie_file = _write_cookies_tempfile()
 
-    cmd = [
-        ytdlp_bin,
-        "--proxy", proxy_url,
+    # If cookies available, skip proxy — authenticated requests bypass bot check directly.
+    # Proxy only needed for unauthenticated requests from datacenter IPs.
+    if cookie_file:
+        print("[downloader] using cookies (no proxy)", flush=True)
+        cmd = [ytdlp_bin]
+    else:
+        proxy_url = _pick_proxy()
+        print(f"[downloader] proxy: {proxy_url.split('@')[-1]}", flush=True)
+        cmd = [ytdlp_bin, "--proxy", proxy_url]
+
+    cmd += [
         "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
         "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
         "--get-url",
