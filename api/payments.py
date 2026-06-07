@@ -60,7 +60,9 @@ class PaymentOut(BaseModel):
     amount_paise: int
     credits_granted: int
     status: str
+    payment_type: str = "topup"
     verified_at: str | None = None
+    created_at: str | None = None
 
 
 # ── Endpoints ────────────────────────────────────────────────
