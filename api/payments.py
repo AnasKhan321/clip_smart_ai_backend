@@ -232,12 +232,14 @@ def get_topup_config():
     presets_str = os.getenv("TOPUP_PRESETS", "100,500,1000,2000,5000")
     presets = [int(x.strip()) for x in presets_str.split(",")]
     credit_price = float(os.getenv("CREDIT_PRICE_INR", "99.99"))
+    min_topup = int(os.getenv("MIN_TOPUP_AMOUNT_INR", "100")) * 100  # Convert to paise
+    max_topup = int(os.getenv("MAX_TOPUP_AMOUNT_INR", "99999")) * 100  # Convert to paise
 
     return {
         "presets": presets,
         "credit_price_inr": credit_price,
-        "min_amount_inr": 100,
-        "max_amount_inr": int(os.getenv("MAX_TOPUP_AMOUNT_INR", "99999")),
+        "min_amount_paise": min_topup,
+        "max_amount_paise": max_topup,
     }
 
 
@@ -247,13 +249,13 @@ def create_topup_payment(
     current_user: User = Depends(get_current_user),
 ) -> CreatePaymentOut:
     """Create one-time top-up payment (not subscription)."""
-    min_topup = 10000  # ₹100 minimum
+    min_topup = int(os.getenv("MIN_TOPUP_AMOUNT_INR", "100")) * 100
     max_topup = int(os.getenv("MAX_TOPUP_AMOUNT_INR", "99999")) * 100
 
     if req.amount_paise < min_topup:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Minimum top-up amount is ₹100"
+            detail=f"Minimum top-up amount is ₹{min_topup // 100}"
         )
 
     if req.amount_paise > max_topup:
