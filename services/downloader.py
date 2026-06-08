@@ -111,19 +111,21 @@ _DEFAULT_COOKIES = """# Netscape HTTP Cookie File
 .youtube.com	TRUE	/	FALSE	1815403794	SID	g.a000-wjpltPHs8XknbNSk1aal-ER4UKNBaM1prTmUSWalnzjYj6_a5YYfMRkr90QYoDPFrMQXQACgYKAVQSARMSFQHGX2MitgOW3cKHaY1N6Co90iyVshoVAUF8yKp00uspPDPfO7gSp4aIaKa_0076
 .youtube.com	TRUE	/	TRUE	1815403794	__Secure-1PSID	g.a000-wjpltPHs8XknbNSk1aal-ER4UKNBaM1prTmUSWalnzjYj6_Mi7_uEG7PtYwzqgjbyp-xQACgYKASUSARMSFQHGX2MiVWgahq1kZZKWUEafy3WGyxoVAUF8yKrt7mjvT-PtjgfLpV9mvQnR0076
 .youtube.com	TRUE	/	TRUE	1815403794	__Secure-3PSID	g.a000-wjpltPHs8XknbNSk1aal-ER4UKNBaM1prTmUSWalnzjYj6_DJ03ap8jj9y-TEaj_VPjQwACgYKAeYSARMSFQHGX2MiGy37BRL6Ergngsf7QxcheBoVAUF8yKrBHcb9hI4bG1AVl56DWNNi0076
-.youtube.com	TRUE	/	TRUE	1812461675	__Secure-1PSIDTS	sidts-CjMByojQU26cPYiFbqKlas8EMjrBPFXQMUepc5y5LddXLeplPbFsWqE5S9Dtj96BOsQKZDEQAA
-.youtube.com	TRUE	/	TRUE	1812461675	__Secure-3PSIDTS	sidts-CjMByojQU26cPYiFbqKlas8EMjrBPFXQMUepc5y5LddXLeplPbFsWqE5S9Dtj96BOsQKZDEQAA
 .youtube.com	TRUE	/	TRUE	1815485762	LOGIN_INFO	AFmmF2swRAIgRuGZBT-lxSg5rLb3lqP1TIFH7sAArgtqKHU3OGFd3dYCIDBmngipPG1BSHYIw6diySkElI0ffnyql7LOz-uQ5qOv:QUQ3MjNmelh4NFFoV0xRNU5iRkdITHQ3a0RsWERaM2d3R2ZabnUzbG1iOFAwM1ZDdHV0ejFScWJNWkhCZUM2aUlGSEs1YktUbVVmVTEtaVJReTdnZ1Y2VGF5UUlsNkVoZldkckROTGZaMkNPdnpIdGUzRmRoMkh0dktOTEFIY3pOT09JVVhESGhfV0JKdWY4LXFSaTRLUnBNLUo3cXlCMWlB
-.youtube.com	TRUE	/	TRUE	1815485764	PREF	f6=40000000&f7=100&tz=Asia.Calcutta&repeat=NONE&autoplay=true
-.youtube.com	TRUE	/	TRUE	1780926364	CONSISTENCY	AHzIXrxv1pzhZ4dEcELY6hMUZDv4hSDGPeIMQsTnreFRFVrWSLkvA1vlH_-m_Qp6FAwDdMf9JT3wam4wBR1FDedrHWQ3-_Jm97Tp1FYGnaHz_BXVo-OwAK9FYqwJFXKMuV79SbMNLbSGOdJ7yTmXzmOW
-.youtube.com	TRUE	/	FALSE	1812461768	SIDCC	AKEyXzWIQSuwKoaNk0iZ0Ybor6LG8M8GYTDMcaunu0gi3cb0OeYhWtsyPTsOfMtEolyFvOJL5qw
-.youtube.com	TRUE	/	TRUE	1812461768	__Secure-1PSIDCC	AKEyXzVETBHcVQPGxsyGlNRS4BKNJDE_D3G84VEUDvuLrmPXk7HWRJ8sD4KE8cdpSFlhdrApIMw-
-.youtube.com	TRUE	/	TRUE	1812461768	__Secure-3PSIDCC	AKEyXzVb-MpqRbpq6pBVFp_XnguixToHwyF-_yIC3ujK5CDesu2fz6-WZgA9P9hHNr6beltQYBm5
-.youtube.com	TRUE	/	TRUE	1796477768	VISITOR_INFO1_LIVE	n0K11kK9N_Y
-.youtube.com	TRUE	/	TRUE	1796477768	VISITOR_PRIVACY_METADATA	CgJJThIEGgAgVg%3D%3D
+.youtube.com	TRUE	/	TRUE	1815487795	PREF	f6=40000000&f7=100&tz=Asia.Calcutta&repeat=NONE&autoplay=true
+.youtube.com	TRUE	/	FALSE	1780927799	ST-l3hjtt	session_logininfo=AFmmF2swRAIgRuGZBT-lxSg5rLb3lqP1TIFH7sAArgtqKHU3OGFd3dYCIDBmngipPG1BSHYIw6diySkElI0ffnyql7LOz-uQ5qOv%3AQUQ3MjNmelh4NFFoV0xRNU5iRkdITHQ3a0RsWERaM2d3R2ZabnUzbG1iOFAwM1ZDdHV0ejFScWJNWkhCZUM2aUlGSEs1YktUbVVmVTEtaVJReTdnZ1Y2VGF5UUlsNkVoZldkckROTGZaMkNPdnpIdGUzRmRoMkh0dktOTEFIY3pOT09JVVhESGhfV0JKdWY4LXFSaTRLUnBNLUo3cXlCMWlB
+.youtube.com	TRUE	/	FALSE	1780927799	ST-tladcw	session_logininfo=AFmmF2swRAIgRuGZBT-lxSg5rLb3lqP1TIFH7sAArgtqKHU3OGFd3dYCIDBmngipPG1BSHYIw6diySkElI0ffnyql7LOz-uQ5qOv%3AQUQ3MjNmelh4NFFoV0xRNU5iRkdITHQ3a0RsWERaM2d3R2ZabnUzbG1iOFAwM1ZDdHV0ejFScWJNWkhCZUM2aUlGSEs1YktUbVVmVTEtaVJReTdnZ1Y2VGF5UUlsNkVoZldkckROTGZaMkNPdnpIdGUzRmRoMkh0dktOTEFIY3pOT09JVVhESGhfV0JKdWY4LXFSaTRLUnBNLUo3cXlCMWlB
+.youtube.com	TRUE	/	FALSE	1780927799	ST-xuwub9	session_logininfo=AFmmF2swRAIgRuGZBT-lxSg5rLb3lqP1TIFH7sAArgtqKHU3OGFd3dYCIDBmngipPG1BSHYIw6diySkElI0ffnyql7LOz-uQ5qOv%3AQUQ3MjNmelh4NFFoV0xRNU5iRkdITHQ3a0RsWERaM2d3R2ZabnUzbG1iOFAwM1ZDdHV0ejFScWJNWkhCZUM2aUlGSEs1YktUbVVmVTEtaVJReTdnZ1Y2VGF5UUlsNkVoZldkckROTGZaMkNPdnpIdGUzRmRoMkh0dktOTEFIY3pOT09JVVhESGhfV0JKdWY4LXFSaTRLUnBNLUo3cXlCMWlB
+.youtube.com	TRUE	/	TRUE	1812463797	__Secure-1PSIDTS	sidts-CjMByojQU_eZHwHDdm7fvjDzunO0MmaANzianC7WI1ZY0quZRvBmGy3YrOKMjjksXG79YjMQAA
+.youtube.com	TRUE	/	TRUE	1812463797	__Secure-3PSIDTS	sidts-CjMByojQU_eZHwHDdm7fvjDzunO0MmaANzianC7WI1ZY0quZRvBmGy3YrOKMjjksXG79YjMQAA
+.youtube.com	TRUE	/	FALSE	1812463798	SIDCC	AKEyXzVdihbrWGkCAjxpj2HfnMzLVQJ5HsNJ57gbx-Sk7frOkFoeZSiyPfQbqii4gIBzs9S_C_A
+.youtube.com	TRUE	/	TRUE	1812463798	__Secure-1PSIDCC	AKEyXzV0N1XeqLmo7-A42jbZKYPInAQ9z0jek8XZeI_5xXVuhQuJO9sX4wIzuzrlkxoNRuNfwzur
+.youtube.com	TRUE	/	TRUE	1812463798	__Secure-3PSIDCC	AKEyXzU1jHo-JhghTeBQ2kVrDr7cUtz9DSG2hHbdm_Kuazk3ztjm6Sqh5l67cvecB411j3ikxGXA
+.youtube.com	TRUE	/	TRUE	1796479792	VISITOR_INFO1_LIVE	n0K11kK9N_Y
+.youtube.com	TRUE	/	TRUE	1796479792	VISITOR_PRIVACY_METADATA	CgJJThIEGgAgVg%3D%3D
 .youtube.com	TRUE	/	TRUE	1796422773	__Secure-YNID	19.YT=jL-r8WvTmq5v8an2EQqb8uCeV6FgeJIC4X1H32bMz7D9FkcOUZaGB0o53wT8SZz07bvwsGpCIR8ow3XHiWZJG_qeqWjlfM8bks0WBbZIvUssEFmiYktr-iwRn2jnfskG_oTElr_6K2TkUmynrHhYBAWMZpBs4IIKHuw1H_xSvuqWRZ21toQEdj_9uYPmMlcgScWIuENGpRlT9HAmhZUI6XGvIktrGGVdk1_H9LCxjotCerLyruLZDbyMA7HHxQ-b3FQjSkL4UzyEnl7NKZo6CfFsENUUcJBoQiKaglVLPWAvTo-097twQQBPQgV6mpbVWmE46kA4R1l3MbbAFIN5HA
 .youtube.com	TRUE	/	TRUE	1796422773	__Secure-ROLLOUT_TOKEN	CJDg7ezyrNrRURDVoZXZu7eTAxjW2a7OlPaUAw%3D%3D
-.youtube.com	TRUE	/	TRUE	0	YSC	m3Efa0Uk2EM
+.youtube.com	TRUE	/	TRUE	0	YSC	szcePSvQhlM
 """
 
 
@@ -174,14 +176,14 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
     }
 
     if cookie_file:
-        print("[downloader] mode: cookies + web client", flush=True)
+        print("[downloader] mode: cookies", flush=True)
         ydl_opts["cookiefile"] = cookie_file
-        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "ios", "web"]}}
     else:
         proxy_url = _pick_proxy()
-        print(f"[downloader] mode: proxy + android client {proxy_url.split('@')[-1]}", flush=True)
+        print(f"[downloader] mode: proxy {proxy_url.split('@')[-1]}", flush=True)
         ydl_opts["proxy"] = proxy_url
-        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "ios", "web"]}}
 
     with ytdlp_lib.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source_url, download=True)
