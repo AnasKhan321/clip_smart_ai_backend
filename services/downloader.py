@@ -171,11 +171,11 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
         "fragment_retries": 3,
         "quiet": True,
         "no_warnings": True,
-        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
 
     if cookie_file:
-        print("[downloader] mode: cookies (no proxy)", flush=True)
+        print("[downloader] mode: cookies + android client", flush=True)
         ydl_opts["cookiefile"] = cookie_file
     else:
         proxy_url = _pick_proxy()
