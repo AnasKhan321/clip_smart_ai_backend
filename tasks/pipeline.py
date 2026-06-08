@@ -22,9 +22,15 @@ logger = logging.getLogger(__name__)
 
 @celery.task(bind=True, name="tasks.test_download")
 def test_download_task(self, url: str) -> dict:
-    import time, shutil, tempfile
-    from services.downloader import _download_via_webshare
+    import time, shutil, tempfile, socket
+    from services.downloader import _download_via_webshare, _write_cookies_tempfile
     tmp = Path(tempfile.mkdtemp())
+    cookie_file = _write_cookies_tempfile()
+    print(f"[test_download] worker_ip={socket.gethostbyname(socket.gethostname())} cookie_file={cookie_file}", flush=True)
+    if cookie_file:
+        with open(cookie_file) as f:
+            lines = [l for l in f.readlines() if not l.startswith("#") and l.strip()]
+        print(f"[test_download] cookie_lines={len(lines)}", flush=True)
     try:
         t0 = time.time()
         meta = _download_via_webshare(url, tmp)
