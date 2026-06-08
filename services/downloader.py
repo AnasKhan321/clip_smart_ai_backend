@@ -96,20 +96,56 @@ def _pick_proxy() -> str:
     return f"http://{host}:{port}"
 
 
+_DEFAULT_COOKIES = """# Netscape HTTP Cookie File
+# https://curl.haxx.se/rfc/cookie_spec.html
+# This is a generated file! Do not edit.
+
+.youtube.com	TRUE	/	FALSE	1782463632	_gcl_au	1.1.540398120.1774687632
+.youtube.com	TRUE	/	TRUE	1791136662	__Secure-BUCKET	CJoB
+.youtube.com	TRUE	/	FALSE	1815403794	HSID	AnbH4_2lUpSKwW9iX
+.youtube.com	TRUE	/	TRUE	1815403794	SSID	AQNTImuZnxFihwA7g
+.youtube.com	TRUE	/	FALSE	1815403794	APISID	PFmQrrSmdMqIUeGy/AVyr1Nhrs90Jfkn42
+.youtube.com	TRUE	/	TRUE	1815403794	SAPISID	HqEFiyEpKxuPHv2D/A_DkLFXpU7hISrXas
+.youtube.com	TRUE	/	TRUE	1815403794	__Secure-1PAPISID	HqEFiyEpKxuPHv2D/A_DkLFXpU7hISrXas
+.youtube.com	TRUE	/	TRUE	1815403794	__Secure-3PAPISID	HqEFiyEpKxuPHv2D/A_DkLFXpU7hISrXas
+.youtube.com	TRUE	/	FALSE	1815403794	SID	g.a000-wjpltPHs8XknbNSk1aal-ER4UKNBaM1prTmUSWalnzjYj6_a5YYfMRkr90QYoDPFrMQXQACgYKAVQSARMSFQHGX2MitgOW3cKHaY1N6Co90iyVshoVAUF8yKp00uspPDPfO7gSp4aIaKa_0076
+.youtube.com	TRUE	/	TRUE	1815403794	__Secure-1PSID	g.a000-wjpltPHs8XknbNSk1aal-ER4UKNBaM1prTmUSWalnzjYj6_Mi7_uEG7PtYwzqgjbyp-xQACgYKASUSARMSFQHGX2MiVWgahq1kZZKWUEafy3WGyxoVAUF8yKrt7mjvT-PtjgfLpV9mvQnR0076
+.youtube.com	TRUE	/	TRUE	1815403794	__Secure-3PSID	g.a000-wjpltPHs8XknbNSk1aal-ER4UKNBaM1prTmUSWalnzjYj6_DJ03ap8jj9y-TEaj_VPjQwACgYKAeYSARMSFQHGX2MiGy37BRL6Ergngsf7QxcheBoVAUF8yKrBHcb9hI4bG1AVl56DWNNi0076
+.youtube.com	TRUE	/	TRUE	1812461675	__Secure-1PSIDTS	sidts-CjMByojQU26cPYiFbqKlas8EMjrBPFXQMUepc5y5LddXLeplPbFsWqE5S9Dtj96BOsQKZDEQAA
+.youtube.com	TRUE	/	TRUE	1812461675	__Secure-3PSIDTS	sidts-CjMByojQU26cPYiFbqKlas8EMjrBPFXQMUepc5y5LddXLeplPbFsWqE5S9Dtj96BOsQKZDEQAA
+.youtube.com	TRUE	/	TRUE	1815485762	LOGIN_INFO	AFmmF2swRAIgRuGZBT-lxSg5rLb3lqP1TIFH7sAArgtqKHU3OGFd3dYCIDBmngipPG1BSHYIw6diySkElI0ffnyql7LOz-uQ5qOv:QUQ3MjNmelh4NFFoV0xRNU5iRkdITHQ3a0RsWERaM2d3R2ZabnUzbG1iOFAwM1ZDdHV0ejFScWJNWkhCZUM2aUlGSEs1YktUbVVmVTEtaVJReTdnZ1Y2VGF5UUlsNkVoZldkckROTGZaMkNPdnpIdGUzRmRoMkh0dktOTEFIY3pOT09JVVhESGhfV0JKdWY4LXFSaTRLUnBNLUo3cXlCMWlB
+.youtube.com	TRUE	/	TRUE	1815485764	PREF	f6=40000000&f7=100&tz=Asia.Calcutta&repeat=NONE&autoplay=true
+.youtube.com	TRUE	/	TRUE	1780926364	CONSISTENCY	AHzIXrxv1pzhZ4dEcELY6hMUZDv4hSDGPeIMQsTnreFRFVrWSLkvA1vlH_-m_Qp6FAwDdMf9JT3wam4wBR1FDedrHWQ3-_Jm97Tp1FYGnaHz_BXVo-OwAK9FYqwJFXKMuV79SbMNLbSGOdJ7yTmXzmOW
+.youtube.com	TRUE	/	FALSE	1812461768	SIDCC	AKEyXzWIQSuwKoaNk0iZ0Ybor6LG8M8GYTDMcaunu0gi3cb0OeYhWtsyPTsOfMtEolyFvOJL5qw
+.youtube.com	TRUE	/	TRUE	1812461768	__Secure-1PSIDCC	AKEyXzVETBHcVQPGxsyGlNRS4BKNJDE_D3G84VEUDvuLrmPXk7HWRJ8sD4KE8cdpSFlhdrApIMw-
+.youtube.com	TRUE	/	TRUE	1812461768	__Secure-3PSIDCC	AKEyXzVb-MpqRbpq6pBVFp_XnguixToHwyF-_yIC3ujK5CDesu2fz6-WZgA9P9hHNr6beltQYBm5
+.youtube.com	TRUE	/	TRUE	1796477768	VISITOR_INFO1_LIVE	n0K11kK9N_Y
+.youtube.com	TRUE	/	TRUE	1796477768	VISITOR_PRIVACY_METADATA	CgJJThIEGgAgVg%3D%3D
+.youtube.com	TRUE	/	TRUE	1796422773	__Secure-YNID	19.YT=jL-r8WvTmq5v8an2EQqb8uCeV6FgeJIC4X1H32bMz7D9FkcOUZaGB0o53wT8SZz07bvwsGpCIR8ow3XHiWZJG_qeqWjlfM8bks0WBbZIvUssEFmiYktr-iwRn2jnfskG_oTElr_6K2TkUmynrHhYBAWMZpBs4IIKHuw1H_xSvuqWRZ21toQEdj_9uYPmMlcgScWIuENGpRlT9HAmhZUI6XGvIktrGGVdk1_H9LCxjotCerLyruLZDbyMA7HHxQ-b3FQjSkL4UzyEnl7NKZo6CfFsENUUcJBoQiKaglVLPWAvTo-097twQQBPQgV6mpbVWmE46kA4R1l3MbbAFIN5HA
+.youtube.com	TRUE	/	TRUE	1796422773	__Secure-ROLLOUT_TOKEN	CJDg7ezyrNrRURDVoZXZu7eTAxjW2a7OlPaUAw%3D%3D
+.youtube.com	TRUE	/	TRUE	0	YSC	m3Efa0Uk2EM
+"""
+
+
 def _write_cookies_tempfile() -> Optional[str]:
     import base64, tempfile
     b64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
-    if not b64:
-        return None
+    if b64:
+        try:
+            content = base64.b64decode(b64).decode("utf-8")
+        except Exception as e:
+            print(f"[downloader] failed to decode YTDLP_COOKIES_B64: {e}", flush=True)
+            content = _DEFAULT_COOKIES
+    else:
+        content = _DEFAULT_COOKIES
     try:
-        content = base64.b64decode(b64).decode("utf-8")
         f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
         f.write(content)
         f.flush()
         f.close()
         return f.name
     except Exception as e:
-        print(f"[downloader] failed to decode YTDLP_COOKIES_B64: {e}", flush=True)
+        print(f"[downloader] failed to write cookies tempfile: {e}", flush=True)
         return None
 
 
@@ -134,14 +170,13 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
         "fragment_retries": 3,
         "quiet": True,
         "no_warnings": True,
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
     }
 
     if cookie_file:
-        # Cookies → Railway IP gets valid CDN URLs → direct download, no proxy cost
         print("[downloader] mode: cookies (no proxy)", flush=True)
         ydl_opts["cookiefile"] = cookie_file
     else:
-        # No cookies → use residential proxy for full download
         proxy_url = _pick_proxy()
         print(f"[downloader] mode: proxy {proxy_url.split('@')[-1]}", flush=True)
         ydl_opts["proxy"] = proxy_url
