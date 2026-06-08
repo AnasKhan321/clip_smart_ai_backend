@@ -303,6 +303,15 @@ def handle_subscription_webhook(payload: str, signature: str) -> None:
                 # Update user.credits
                 user.credits = subscription.subscription_credits_balance + user.topup_credits_balance
 
+                # Convert all free clips to paid (subscription active, preserve clips)
+                from models import Clip, Job
+                free_clips = db.query(Clip).join(Job).filter(
+                    Job.user_id == user.id,
+                    Clip.credit_type == "free"
+                ).all()
+                for clip in free_clips:
+                    clip.credit_type = "paid"
+
                 txn = CreditTransaction(
                     user_id=user.id,
                     kind="subscription_grant",
@@ -314,7 +323,7 @@ def handle_subscription_webhook(payload: str, signature: str) -> None:
                 db.add(subscription)
                 db.add(txn)
                 db.commit()
-                logger.info(f"Subscription {razorpay_subscription_id} charged & activated, granted {tier.total_credits} credits")
+                logger.info(f"Subscription {razorpay_subscription_id} charged & activated, granted {tier.total_credits} credits. {len(free_clips)} clips preserved.")
 
         elif event_type == "subscription.completed":
             sub_data = event.get("payload", {}).get("subscription", {}).get("entity", {})

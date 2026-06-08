@@ -202,10 +202,20 @@ def grant_credits(
         raise HTTPException(404, f"No user with email {payload.email}")
 
     grant(db, target, payload.amount, kind="admin_grant", note=payload.note or f"Granted by {admin_user.email}")
+
+    # Convert all free clips to paid (admin granted credits, so preserve clips)
+    from models import Clip, Job
+    free_clips = db.query(Clip).join(Job).filter(
+        Job.user_id == target.id,
+        Clip.credit_type == "free"
+    ).all()
+    for clip in free_clips:
+        clip.credit_type = "paid"
+
     log_admin(
         db, admin_user, "grant_credits",
         target_type="user", target_id=target.id, target_email=target.email,
-        payload={"amount": payload.amount, "note": payload.note, "new_balance": target.credits},
+        payload={"amount": payload.amount, "note": payload.note, "new_balance": target.credits, "clips_preserved": len(free_clips)},
     )
     db.commit()
     db.refresh(target)

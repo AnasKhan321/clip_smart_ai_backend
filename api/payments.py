@@ -52,7 +52,7 @@ class VerifyPaymentOut(BaseModel):
 
 
 class PaymentOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, serialize_as_any=True)
 
     id: str
     razorpay_order_id: str
@@ -63,6 +63,22 @@ class PaymentOut(BaseModel):
     payment_type: str = "topup"
     verified_at: str | None = None
     created_at: str | None = None
+
+    @classmethod
+    def from_db(cls, obj):
+        """Convert DB object with datetime fields to schema."""
+        data = {
+            'id': obj.id,
+            'razorpay_order_id': obj.razorpay_order_id,
+            'razorpay_payment_id': obj.razorpay_payment_id,
+            'amount_paise': obj.amount_paise,
+            'credits_granted': obj.credits_granted,
+            'status': obj.status,
+            'payment_type': obj.payment_type,
+            'verified_at': obj.verified_at.isoformat() if obj.verified_at else None,
+            'created_at': obj.created_at.isoformat() if obj.created_at else None,
+        }
+        return cls(**data)
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -194,7 +210,7 @@ def get_payment_status(
             detail="Payment not found"
         )
 
-    return PaymentOut.model_validate(payment)
+    return PaymentOut.from_db(payment)
 
 
 @router.get("/history", response_model=list[PaymentOut])
@@ -207,7 +223,7 @@ def get_payment_history(
         Payment.user_id == current_user.id
     ).order_by(Payment.created_at.desc()).all()
 
-    return [PaymentOut.model_validate(p) for p in payments]
+    return [PaymentOut.from_db(p) for p in payments]
 
 
 @router.post("/topup", response_model=CreatePaymentOut)
@@ -285,11 +301,21 @@ def verify_topup_payment(
             razorpay_signature=req.razorpay_signature,
             db=db,
         )
+
+        # Convert all free clips to paid (user bought credits, so preserve old clips)
+        from models import Clip, Job
+        free_clips = db.query(Clip).join(Job).filter(
+            Job.user_id == current_user.id,
+            Clip.credit_type == "free"
+        ).all()
+        for clip in free_clips:
+            clip.credit_type = "paid"
+
         db.commit()
 
         return VerifyPaymentOut(
             status="success",
-            message=f"Top-up verified and {payment.credits_granted} credits added",
+            message=f"Top-up verified and {payment.credits_granted} credits added. {len(free_clips)} clips preserved.",
             payment_id=result["payment_id"]
         )
 
