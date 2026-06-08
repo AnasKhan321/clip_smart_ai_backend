@@ -166,7 +166,7 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
 
     ydl_opts = {
         "outtmpl": out_template,
-        "format": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
+        "format": "bestvideo[height<=1080][vcodec!*=av01]+bestaudio[ext=m4a]/bestvideo[height<=1080]+bestaudio/best[height<=1080]/best",
         "merge_output_format": "mp4",
         "progress_hooks": [_progress_hook],
         "retries": 3,
@@ -176,14 +176,14 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
     }
 
     if cookie_file:
-        print("[downloader] mode: cookies", flush=True)
+        print("[downloader] mode: cookies + ios client", flush=True)
         ydl_opts["cookiefile"] = cookie_file
-        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "ios", "web"]}}
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios"]}}
     else:
         proxy_url = _pick_proxy()
-        print(f"[downloader] mode: proxy {proxy_url.split('@')[-1]}", flush=True)
+        print(f"[downloader] mode: proxy + ios client {proxy_url.split('@')[-1]}", flush=True)
         ydl_opts["proxy"] = proxy_url
-        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "ios", "web"]}}
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["ios"]}}
 
     with ytdlp_lib.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source_url, download=True)
