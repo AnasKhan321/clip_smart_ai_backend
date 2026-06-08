@@ -226,6 +226,21 @@ def get_payment_history(
     return [PaymentOut.from_db(p) for p in payments]
 
 
+@router.get("/topup/config")
+def get_topup_config():
+    """Get topup presets from environment."""
+    presets_str = os.getenv("TOPUP_PRESETS", "100,500,1000,2000,5000")
+    presets = [int(x.strip()) for x in presets_str.split(",")]
+    credit_price = float(os.getenv("CREDIT_PRICE_INR", "99.99"))
+
+    return {
+        "presets": presets,
+        "credit_price_inr": credit_price,
+        "min_amount_inr": 100,
+        "max_amount_inr": int(os.getenv("MAX_TOPUP_AMOUNT_INR", "99999")),
+    }
+
+
 @router.post("/topup", response_model=CreatePaymentOut)
 def create_topup_payment(
     req: CreatePaymentIn,
