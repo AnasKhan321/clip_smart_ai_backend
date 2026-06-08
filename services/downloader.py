@@ -52,70 +52,65 @@ def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     return {**meta, "video_path": video_path_abs, "audio_path": str(audio_path)}
 
 
-def _write_cookies_tempfile() -> Optional[str]:
-    """Decode YTDLP_COOKIES_B64 env var → temp file. Returns path or None."""
-    import base64, tempfile
-    b64 = os.getenv("YTDLP_COOKIES_B64", "").strip()
-    if not b64:
-        return None
-    try:
-        content = base64.b64decode(b64).decode("utf-8")
-        f = tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False)
-        f.write(content)
-        f.flush()
-        f.close()
-        return f.name
-    except Exception as e:
-        print(f"[downloader] failed to decode YTDLP_COOKIES_B64: {e}", flush=True)
-        return None
-
-
 def _pick_proxy() -> str:
-    """Pick a proxy URL from WEBSHARE_PROXY_LIST (comma-separated host:port entries)
-    or fall back to single WEBSHARE_HOST/PORT. Rotates randomly across all entries."""
+    """Pick a random proxy from WEBSHARE_PROXY_LIST (newline or comma-separated).
+    Each entry: host:port:user:pass  OR  host:port (uses WEBSHARE_USER/PASS).
+    Falls back to WEBSHARE_HOST/PORT/USER/PASS env vars."""
     import random
+
+    _DEFAULT_PROXIES = (
+        "p.webshare.io:80:ryekmtdt-gb-1:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-ca-2:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-de-3:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-fr-4:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-au-5:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-nl-6:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-it-7:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-es-8:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-be-9:npg0qrmoknbj\n"
+        "p.webshare.io:80:ryekmtdt-at-10:npg0qrmoknbj"
+    )
+    proxy_list = os.getenv("WEBSHARE_PROXY_LIST", _DEFAULT_PROXIES).strip()
+    if proxy_list:
+        sep = "\n" if "\n" in proxy_list else ","
+        entries = [e.strip() for e in proxy_list.split(sep) if e.strip()]
+        entry = random.choice(entries)
+        parts = entry.split(":")
+        if len(parts) == 4:
+            host, port, user, pw = parts
+            return f"http://{user}:{pw}@{host}:{port}"
+        elif len(parts) == 2:
+            host, port = parts
+            user = os.getenv("WEBSHARE_USER", "")
+            pw = os.getenv("WEBSHARE_PASS", "")
+            if user and pw:
+                return f"http://{user}:{pw}@{host}:{port}"
+            return f"http://{host}:{port}"
+
+    host = os.getenv("WEBSHARE_HOST", "")
+    port = os.getenv("WEBSHARE_PORT", "80")
     user = os.getenv("WEBSHARE_USER", "")
     pw = os.getenv("WEBSHARE_PASS", "")
-
-    proxy_list = os.getenv("WEBSHARE_PROXY_LIST", "").strip()
-    if proxy_list:
-        entries = [e.strip() for e in proxy_list.split(",") if e.strip()]
-        host_port = random.choice(entries)
-    else:
-        host = os.getenv("WEBSHARE_HOST", "")
-        port = os.getenv("WEBSHARE_PORT", "80")
-        if not host:
-            raise RuntimeError("WEBSHARE_HOST not set")
-        host_port = f"{host}:{port}"
-
+    if not host:
+        raise RuntimeError("WEBSHARE_HOST not set")
     if user and pw:
-        return f"http://{user}:{pw}@{host_port}"
-    return f"http://{host_port}"
+        return f"http://{user}:{pw}@{host}:{port}"
+    return f"http://{host}:{port}"
 
 
 def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:
+    proxy_url = _pick_proxy()
+    print(f"[downloader] proxy: {proxy_url.split('@')[-1]}", flush=True)
+
     ytdlp_bin = shutil.which("yt-dlp") or "yt-dlp"
-    cookie_file = _write_cookies_tempfile()
-
-    # If cookies available, skip proxy — authenticated requests bypass bot check directly.
-    # Proxy only needed for unauthenticated requests from datacenter IPs.
-    if cookie_file:
-        print("[downloader] using cookies (no proxy)", flush=True)
-        cmd = [ytdlp_bin]
-    else:
-        proxy_url = _pick_proxy()
-        print(f"[downloader] proxy: {proxy_url.split('@')[-1]}", flush=True)
-        cmd = [ytdlp_bin, "--proxy", proxy_url]
-
-    cmd += [
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best",
+    cmd = [
+        ytdlp_bin,
+        "--proxy", proxy_url,
         "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
         "--get-url",
         "--no-warnings",
+        source_url,
     ]
-    if cookie_file:
-        cmd += ["--cookies", cookie_file]
-    cmd.append(source_url)
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp --get-url exit {result.returncode}: {result.stderr.strip()[-300:]}")
