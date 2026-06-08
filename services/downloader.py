@@ -18,7 +18,11 @@ def get_job_dir(job_id: str) -> Path:
 def download_video(url: str, job_id: str, progress_callback=None) -> dict:
     job_dir = get_job_dir(job_id)
 
-    meta = _download_via_webshare(url, job_dir, progress_callback)
+    svc_url = os.getenv("DOWNLOAD_SERVICE_URL", "").strip()
+    if svc_url:
+        meta = _download_via_mac_service(url, job_id, job_dir, svc_url, progress_callback)
+    else:
+        meta = _download_via_webshare(url, job_dir, progress_callback)
 
     video_path = _find_video_file(job_dir)
     if not video_path:
@@ -149,6 +153,45 @@ def _write_cookies_tempfile() -> Optional[str]:
     except Exception as e:
         print(f"[downloader] failed to write cookies tempfile: {e}", flush=True)
         return None
+
+
+def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_url: str, progress_callback=None) -> dict:
+    import httpx
+    from services import r2
+
+    secret = os.getenv("DOWNLOAD_SERVICE_SECRET", "changeme")
+    print(f"[downloader] mode: mac-service {svc_url}", flush=True)
+
+    resp = httpx.post(
+        f"{svc_url.rstrip('/')}/download",
+        json={"url": source_url, "job_id": job_id},
+        headers={"x-secret": secret},
+        timeout=600,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Download service error {resp.status_code}: {resp.text[:300]}")
+
+    data = resp.json()
+    r2_key = data["r2_key"]
+    ext = data.get("ext", "mp4")
+    print(f"[downloader] mac-service done: {data.get('width')}x{data.get('height')} {ext}, downloading from R2", flush=True)
+
+    if progress_callback:
+        progress_callback(80)
+
+    # Download from R2 to local job dir
+    local_path = job_dir / f"original.{ext}"
+    r2.download_file(r2_key, str(local_path))
+
+    if progress_callback:
+        progress_callback(100)
+
+    return {
+        "title": data.get("title", "video"),
+        "duration": data.get("duration", 0),
+        "video_path": str(local_path),
+        "audio_path": str(job_dir / "audio.wav"),
+    }
 
 
 def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:

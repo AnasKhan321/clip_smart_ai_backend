@@ -22,18 +22,20 @@ logger = logging.getLogger(__name__)
 
 @celery.task(bind=True, name="tasks.test_download")
 def test_download_task(self, url: str) -> dict:
-    import time, shutil, tempfile, socket
+    import time, shutil, tempfile, socket, uuid
     from services.downloader import _download_via_webshare, _write_cookies_tempfile
     tmp = Path(tempfile.mkdtemp())
-    cookie_file = _write_cookies_tempfile()
-    print(f"[test_download] worker_ip={socket.gethostbyname(socket.gethostname())} cookie_file={cookie_file}", flush=True)
-    if cookie_file:
-        with open(cookie_file) as f:
-            lines = [l for l in f.readlines() if not l.startswith("#") and l.strip()]
-        print(f"[test_download] cookie_lines={len(lines)}", flush=True)
+    print(f"[test_download] worker_ip={socket.gethostbyname(socket.gethostname())}", flush=True)
     try:
         t0 = time.time()
-        meta = _download_via_webshare(url, tmp)
+        import os as _os
+        svc_url = _os.getenv("DOWNLOAD_SERVICE_URL", "").strip()
+        if svc_url:
+            from services.downloader import _download_via_mac_service
+            meta = _download_via_mac_service(url, "test-" + str(uuid.uuid4())[:8], tmp, svc_url)
+        else:
+            from services.downloader import _download_via_webshare
+            meta = _download_via_webshare(url, tmp)
         elapsed = round(time.time() - t0, 1)
         files = list(tmp.iterdir())
         size_mb = round(sum(f.stat().st_size for f in files) / 1024 / 1024, 1) if files else 0
