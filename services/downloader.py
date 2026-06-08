@@ -164,6 +164,7 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
 
     ydl_opts = {
         "outtmpl": out_template,
+        "format": "bestvideo[height<=1080]+bestaudio/bestvideo+bestaudio/best",
         "merge_output_format": "mp4",
         "progress_hooks": [_progress_hook],
         "retries": 3,

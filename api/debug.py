@@ -82,6 +82,41 @@ def debug_job(job_id: str, db: Session = Depends(get_db), _: None = Depends(requ
     }
 
 
+@router.post("/test-download")
+def test_download(
+    url: str = Query(..., description="YouTube URL to test"),
+    _: None = Depends(require_debug_enabled),
+):
+    """Download a video and report quality/speed. No credits deducted."""
+    import time, shutil, tempfile
+    from pathlib import Path
+    from services.downloader import _download_via_webshare
+
+    tmp = Path(tempfile.mkdtemp())
+    try:
+        t0 = time.time()
+        meta = _download_via_webshare(url, tmp)
+        elapsed = round(time.time() - t0, 1)
+
+        # find downloaded file
+        files = list(tmp.iterdir())
+        size_mb = round(sum(f.stat().st_size for f in files) / 1024 / 1024, 1) if files else 0
+        speed_mbps = round(size_mb / elapsed, 2) if elapsed > 0 else 0
+
+        return {
+            "ok": True,
+            "title": meta.get("title"),
+            "duration_s": meta.get("duration"),
+            "size_mb": size_mb,
+            "elapsed_s": elapsed,
+            "avg_speed_mbs": speed_mbps,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 @router.post("/jobs/{job_id}/rerun")
 def rerun_job(job_id: str, db: Session = Depends(get_db), _: None = Depends(require_debug_enabled)):
     job = db.query(Job).filter(Job.id == job_id).first()
