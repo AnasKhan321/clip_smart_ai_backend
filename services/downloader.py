@@ -156,30 +156,46 @@ def _write_cookies_tempfile() -> Optional[str]:
 
 
 def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_url: str, progress_callback=None) -> dict:
-    import httpx
+    import httpx, time
     from services import r2
 
     secret = os.getenv("DOWNLOAD_SERVICE_SECRET", "changeme")
-    print(f"[downloader] mode: mac-service {svc_url}", flush=True)
+    base = svc_url.rstrip("/")
+    headers = {"x-secret": secret}
+    print(f"[downloader] mode: mac-service {base}", flush=True)
 
-    resp = httpx.post(
-        f"{svc_url.rstrip('/')}/download",
-        json={"url": source_url, "job_id": job_id},
-        headers={"x-secret": secret},
-        timeout=600,
-    )
+    # Submit async download job
+    resp = httpx.post(f"{base}/download", json={"url": source_url, "job_id": job_id}, headers=headers, timeout=30)
     if resp.status_code != 200:
         raise RuntimeError(f"Download service error {resp.status_code}: {resp.text[:300]}")
 
-    data = resp.json()
+    task_id = resp.json()["task_id"]
+    print(f"[downloader] mac-service task_id={task_id}", flush=True)
+
+    # Poll for completion (max 15 min)
+    for i in range(180):
+        time.sleep(5)
+        r = httpx.get(f"{base}/status/{task_id}", headers=headers, timeout=15)
+        data = r.json()
+        st = data.get("status")
+        if i % 6 == 0:
+            print(f"[downloader] mac-service polling... {i*5}s status={st}", flush=True)
+        if progress_callback and st == "downloading":
+            progress_callback(min(10 + i, 75))
+        if st == "done":
+            break
+        if st == "error":
+            raise RuntimeError(f"Download service failed: {data.get('error')}")
+    else:
+        raise RuntimeError("Download service timed out after 15 minutes")
+
     r2_key = data["r2_key"]
     ext = data.get("ext", "mp4")
-    print(f"[downloader] mac-service done: {data.get('width')}x{data.get('height')} {ext}, downloading from R2", flush=True)
+    print(f"[downloader] mac-service done: {data.get('width')}x{data.get('height')} {ext}", flush=True)
 
     if progress_callback:
         progress_callback(80)
 
-    # Download from R2 to local job dir
     local_path = job_dir / f"original.{ext}"
     r2.download_file(r2_key, str(local_path))
 
