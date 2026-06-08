@@ -171,16 +171,17 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
         "fragment_retries": 3,
         "quiet": True,
         "no_warnings": True,
-        "extractor_args": {"youtube": {"player_client": ["android"]}},
     }
 
     if cookie_file:
-        print("[downloader] mode: cookies + android client", flush=True)
+        print("[downloader] mode: cookies + web client", flush=True)
         ydl_opts["cookiefile"] = cookie_file
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
     else:
         proxy_url = _pick_proxy()
-        print(f"[downloader] mode: proxy {proxy_url.split('@')[-1]}", flush=True)
+        print(f"[downloader] mode: proxy + android client {proxy_url.split('@')[-1]}", flush=True)
         ydl_opts["proxy"] = proxy_url
+        ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android"]}}
 
     with ytdlp_lib.YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(source_url, download=True)
