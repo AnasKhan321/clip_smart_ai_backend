@@ -2,6 +2,8 @@ import os
 import json
 import shutil
 import subprocess
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -101,35 +103,81 @@ def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=Non
     print(f"[downloader] proxy: {proxy_url.split('@')[-1]}", flush=True)
 
     ytdlp_bin = shutil.which("yt-dlp") or "yt-dlp"
-    out_template = str(job_dir / "original.%(ext)s")
 
-    def _progress_hook(d):
-        if d["status"] == "downloading" and progress_callback:
-            total = d.get("total_bytes") or d.get("total_bytes_estimate", 0)
-            downloaded = d.get("downloaded_bytes", 0)
-            if total > 0:
-                progress_callback(int(downloaded / total * 80))
+    # Use proxy only for URL extraction (KB of traffic).
+    # CDN URLs are signed and served by any IP — download direct (no proxy cost).
+    cmd = [
+        ytdlp_bin,
+        "--proxy", proxy_url,
+        "--print", "%(width)sx%(height)s %(ext)s %(format_note)s",
+        "--get-url",
+        "--no-warnings",
+        source_url,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if result.returncode != 0:
+        raise RuntimeError(f"yt-dlp --get-url exit {result.returncode}: {result.stderr.strip()[-300:]}")
 
-    import yt_dlp as ytdlp_lib
-    ydl_opts = {
-        "outtmpl": out_template,
-        "proxy": proxy_url,
-        "merge_output_format": "mp4",
-        "progress_hooks": [_progress_hook],
-        "retries": 3,
-        "fragment_retries": 3,
-        "quiet": True,
-        "no_warnings": True,
-    }
+    lines = [l.strip() for l in result.stdout.strip().splitlines() if l.strip()]
+    cdn_urls = [l for l in lines if l.startswith("http")]
+    info_lines = [l for l in lines if not l.startswith("http")]
+    if info_lines:
+        print(f"[downloader] quality: {info_lines[0]}", flush=True)
+    if not cdn_urls:
+        raise RuntimeError("yt-dlp --get-url returned no URLs")
 
-    with ytdlp_lib.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(source_url, download=True)
-        print(f"[downloader] quality: {info.get('width')}x{info.get('height')} {info.get('ext')}", flush=True)
+    video_cdn = cdn_urls[0]
+    audio_cdn = cdn_urls[1] if len(cdn_urls) > 1 else None
 
-    return {
-        "title": info.get("title", "video"),
-        "duration": info.get("duration", 0),
-    }
+    yt_ua = "com.google.android.youtube/19.09.37 (Linux; U; Android 14)"
+
+    def _fetch(src: str, dst: Path):
+        for attempt in range(3):
+            try:
+                req = urllib.request.Request(src, headers={"User-Agent": yt_ua})
+                with urllib.request.urlopen(req, timeout=120) as r:
+                    with open(dst, "wb") as f:
+                        while True:
+                            chunk = r.read(256 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                return
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                print(f"[downloader] fetch attempt {attempt+1} failed ({e}), retrying", flush=True)
+
+    if progress_callback:
+        progress_callback(10)
+
+    if audio_cdn:
+        vid_path = job_dir / "_ws_video.mp4"
+        aud_path = job_dir / "_ws_audio.m4a"
+        with ThreadPoolExecutor(max_workers=2) as ex:
+            futs = [ex.submit(_fetch, video_cdn, vid_path), ex.submit(_fetch, audio_cdn, aud_path)]
+            for f in futs:
+                f.result()
+        if progress_callback:
+            progress_callback(70)
+        out_path = job_dir / "original.mp4"
+        subprocess.run(
+            [ffmpeg_path(), "-y", "-i", str(vid_path), "-i", str(aud_path),
+             "-c", "copy", "-movflags", "+faststart", str(out_path)],
+            check=True, capture_output=True, timeout=3600,
+        )
+        for p in (vid_path, aud_path):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    else:
+        out_path = job_dir / "original.mp4"
+        _fetch(video_cdn, out_path)
+        if progress_callback:
+            progress_callback(70)
+
+    return {"title": "video", "duration": 0}
 
 
 def save_uploaded_file(file_bytes: bytes, filename: str, job_id: str) -> dict:
