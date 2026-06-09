@@ -239,3 +239,17 @@ class MusicTrack(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     user = relationship("User")
+
+
+class CachedVideo(Base):
+    __tablename__ = "cached_videos"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    video_id = Column(String, unique=True, nullable=False, index=True)  # YouTube video ID
+    title = Column(String, nullable=True)
+    duration = Column(Float, nullable=True)
+    r2_key_720p = Column(String, nullable=True)   # R2 path for 720p version
+    r2_key_1080p = Column(String, nullable=True)  # R2 path for 1080p version
+    last_used_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    expires_at = Column(DateTime, nullable=False)  # last_used_at + 30 days
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -15,6 +15,7 @@ from services.analyzer import analyze_transcript, find_more_clips
 from services.editor import render_and_caption_clip, probe_source_dims
 from services.credits import refund
 from services import r2
+from services.video_cache import required_quality, get_cache_hit, touch_cache, store_cache
 
 
 logger = logging.getLogger(__name__)
@@ -305,17 +306,60 @@ def run_full_pipeline(self, job_id: str, options: dict):
             _set_job_status(db, job_id, "downloading", p)
 
         if job.source_type == "url":
-            meta = download_video(job.source_url, job_id,
-                                  progress_callback=dl_progress)
-            # Mirror original to R2 in background so future re-runs / serving
-            # don't need to re-download from YouTube.
-            if r2.is_enabled() and meta.get("video_path"):
-                key = r2.source_key(job_id)
-                r2.upload_in_background(meta["video_path"], key)
+            # Determine quality from subscription tier
+            user = db.query(User).filter(User.id == job.user_id).first()
+            quality = required_quality(user) if user else "720p"
+
+            # Check R2 cache first — avoid re-downloading the same video
+            cache_entry = get_cache_hit(db, job.source_url, quality)
+            if cache_entry:
+                cached_key = cache_entry.r2_key_1080p if quality == "1080p" else cache_entry.r2_key_720p
+                print(f"[pipeline] cache hit video_id={cache_entry.video_id} quality={quality} key={cached_key}", flush=True)
+                job_dir = Path(os.getenv("STORAGE_PATH", "./storage")) / "jobs" / job_id
+                job_dir.mkdir(parents=True, exist_ok=True)
+                local_path = job_dir / "original.mp4"
+                r2.download_file(cached_key, str(local_path))
+                touch_cache(db, cache_entry)
+                # Point job r2_source_key at the cached object so re-runs don't re-download
                 job_row = db.query(Job).filter(Job.id == job_id).first()
                 if job_row and not job_row.r2_source_key:
-                    job_row.r2_source_key = key
+                    job_row.r2_source_key = cached_key
                     db.commit()
+                meta = {
+                    "title": cache_entry.title,
+                    "duration": cache_entry.duration,
+                    "video_path": str(local_path),
+                    "audio_path": str(job_dir / "audio.wav"),
+                }
+                dl_progress(100)
+            else:
+                # Fresh download — tell mac service which quality to fetch and where to put it
+                import re as _re
+                _vid_match = _re.search(r"[?&]v=([a-zA-Z0-9_-]{11})|youtu\.be/([a-zA-Z0-9_-]{11})|/shorts/([a-zA-Z0-9_-]{11})", job.source_url or "")
+                _vid_id = next((g for g in (_vid_match.groups() if _vid_match else []) if g), "")
+                cache_r2_key = f"cache/{_vid_id}/{quality}.mp4" if _vid_id else ""
+
+                meta = download_video(job.source_url, job_id,
+                                      progress_callback=dl_progress,
+                                      quality=quality,
+                                      cache_r2_key=cache_r2_key)
+
+                # Persist in cache table so next user benefits
+                if _vid_id and cache_r2_key and meta.get("video_path"):
+                    store_cache(
+                        db, job.source_url, quality, cache_r2_key,
+                        title=meta.get("title", ""),
+                        duration=float(meta.get("duration") or 0),
+                    )
+
+                # Mirror original to R2 in background (for clip re-runs on fresh workers)
+                if r2.is_enabled() and meta.get("video_path"):
+                    key = r2.source_key(job_id)
+                    r2.upload_in_background(meta["video_path"], key)
+                    job_row = db.query(Job).filter(Job.id == job_id).first()
+                    if job_row and not job_row.r2_source_key:
+                        job_row.r2_source_key = key
+                        db.commit()
         else:
             from services.downloader import (
                 _extract_audio, _get_duration, _needs_wav_extraction, get_job_dir,

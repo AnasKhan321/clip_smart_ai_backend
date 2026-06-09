@@ -33,6 +33,8 @@ async def lifespan(app: FastAPI):
     # Reset any "exporting" clips left over from a prior worker crash. Without
     # this they stay stuck forever and the frontend polls until timeout.
     _reset_stale_exports()
+    # Purge expired video cache entries
+    _purge_video_cache()
     # Seed subscription tiers
     _seed_subscription_tiers()
     yield
@@ -74,6 +76,24 @@ def _reset_stale_exports() -> None:
         logger.exception("startup sweeper failed: %s", exc)
     finally:
         s.close()
+
+
+def _purge_video_cache() -> None:
+    """Delete expired cached_videos rows on startup."""
+    import logging
+    from database import SessionLocal
+    from services.video_cache import purge_expired
+
+    logger = logging.getLogger(__name__)
+    db = SessionLocal()
+    try:
+        n = purge_expired(db)
+        if n:
+            logger.info("video cache: purged %d expired entries", n)
+    except Exception as exc:
+        logger.exception("video cache purge failed: %s", exc)
+    finally:
+        db.close()
 
 
 def _seed_subscription_tiers() -> None:

@@ -15,12 +15,14 @@ def get_job_dir(job_id: str) -> Path:
     return path
 
 
-def download_video(url: str, job_id: str, progress_callback=None) -> dict:
+def download_video(url: str, job_id: str, progress_callback=None,
+                   quality: str = "720p", cache_r2_key: str = "") -> dict:
     job_dir = get_job_dir(job_id)
 
     svc_url = os.getenv("DOWNLOAD_SERVICE_URL", "").strip()
     if svc_url:
-        meta = _download_via_mac_service(url, job_id, job_dir, svc_url, progress_callback)
+        meta = _download_via_mac_service(url, job_id, job_dir, svc_url, progress_callback,
+                                         quality=quality, cache_r2_key=cache_r2_key)
     else:
         meta = _download_via_webshare(url, job_dir, progress_callback)
 
@@ -155,17 +157,22 @@ def _write_cookies_tempfile() -> Optional[str]:
         return None
 
 
-def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_url: str, progress_callback=None) -> dict:
+def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_url: str,
+                              progress_callback=None, quality: str = "720p",
+                              cache_r2_key: str = "") -> dict:
     import httpx, time
     from services import r2
 
     secret = os.getenv("DOWNLOAD_SERVICE_SECRET", "changeme")
     base = svc_url.rstrip("/")
     headers = {"x-secret": secret}
-    print(f"[downloader] mode: mac-service {base}", flush=True)
+    print(f"[downloader] mode: mac-service {base} quality={quality}", flush=True)
 
+    payload = {"url": source_url, "job_id": job_id, "quality": quality}
+    if cache_r2_key:
+        payload["r2_key"] = cache_r2_key
     # Submit async download job
-    resp = httpx.post(f"{base}/download", json={"url": source_url, "job_id": job_id}, headers=headers, timeout=30)
+    resp = httpx.post(f"{base}/download", json=payload, headers=headers, timeout=30)
     if resp.status_code != 200:
         raise RuntimeError(f"Download service error {resp.status_code}: {resp.text[:300]}")
 
