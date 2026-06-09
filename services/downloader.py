@@ -182,8 +182,13 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
     # Poll for completion (max 15 min)
     for i in range(180):
         time.sleep(5)
-        r = httpx.get(f"{base}/status/{task_id}", headers=headers, timeout=15)
-        data = r.json()
+        try:
+            r = httpx.get(f"{base}/status/{task_id}", headers=headers, timeout=30)
+            data = r.json()
+        except Exception as e:
+            print(f"[downloader] mac-service polling error (will retry): {e}", flush=True)
+            continue
+
         st = data.get("status")
         if i % 6 == 0:
             print(f"[downloader] mac-service polling... {i*5}s status={st}", flush=True)
