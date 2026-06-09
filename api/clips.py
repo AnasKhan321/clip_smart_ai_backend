@@ -508,6 +508,10 @@ def get_clip_expiry_info(
     if clip.credit_type != "free":
         return {"credit_type": clip.credit_type, "days_left": None, "is_expired": False}
 
+    # User has subscription or topup credits → no expiry
+    if user.subscription_tier_id or user.topup_credits_balance > 0:
+        return {"credit_type": "paid", "days_left": None, "is_expired": False}
+
     expiry_date = clip.created_at + timedelta(days=3)
     time_left = (expiry_date - datetime.utcnow()).total_seconds()
     days_left = max(0, math.ceil(time_left / 86400)) if time_left > 0 else 0
