@@ -220,7 +220,8 @@ def get_payment_history(
 ) -> list[PaymentOut]:
     """Get all payments for current user."""
     payments = db.query(Payment).filter(
-        Payment.user_id == current_user.id
+        Payment.user_id == current_user.id,
+        Payment.status.notin_(["pending", "expired"]),
     ).order_by(Payment.created_at.desc()).all()
 
     return [PaymentOut.from_db(p) for p in payments]

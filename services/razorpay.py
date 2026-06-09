@@ -3,7 +3,7 @@ import hmac
 import hashlib
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import razorpay
 from sqlalchemy.orm import Session
 from database import SessionLocal
@@ -43,9 +43,17 @@ def create_order(user_id: str, amount_paise: int, credits: int) -> dict:
         razorpay_order = client.order.create(data=order_data)
         logger.info(f"Created order: {razorpay_order['id']} for user {user_id}")
 
-        # Save order to DB (pending)
+        # Save order to DB (pending). Expire any stale pending orders first.
         db = SessionLocal()
         try:
+            cutoff = datetime.utcnow() - timedelta(minutes=30)
+            stale = db.query(Payment).filter(
+                Payment.user_id == user_id,
+                Payment.status == "pending",
+                Payment.created_at < cutoff,
+            ).all()
+            for s in stale:
+                s.status = "expired"
             payment = Payment(
                 user_id=user_id,
                 razorpay_order_id=razorpay_order["id"],
