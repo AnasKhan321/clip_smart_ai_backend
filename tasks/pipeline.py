@@ -253,6 +253,17 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
 def _insert_candidate_clips(db, job_id: str, candidates: list,
                              video_duration: float, rank_offset: int = 0) -> list:
     """Validate + insert clip candidates. Returns the new Clip rows."""
+    from models import Payment, CreditTransaction
+    job = db.query(Job).filter(Job.id == job_id).first()
+    credit_type = "free"
+    if job and job.user_id:
+        user = db.query(User).filter(User.id == job.user_id).first()
+        if user:
+            has_payment = db.query(Payment).filter(Payment.user_id == user.id, Payment.status == "success").first() is not None
+            has_admin_grant = db.query(CreditTransaction).filter(CreditTransaction.user_id == user.id, CreditTransaction.kind == "admin_grant").first() is not None
+            if user.subscription_tier_id or has_payment or has_admin_grant:
+                credit_type = "paid"
+
     new_rows = []
     for i, candidate in enumerate(candidates):
         start = candidate.get("start_seconds")
@@ -282,7 +293,7 @@ def _insert_candidate_clips(db, job_id: str, candidates: list,
             hook_line=candidate.get("hook_line"),
             tags=tags,
             status="pending",
-            credit_type="free",
+            credit_type=credit_type,
         )
         db.add(clip)
         new_rows.append(clip)

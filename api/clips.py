@@ -508,8 +508,12 @@ def get_clip_expiry_info(
     if clip.credit_type != "free":
         return {"credit_type": clip.credit_type, "days_left": None, "is_expired": False}
 
-    # User has subscription or topup credits → no expiry
-    if user.subscription_tier_id or user.topup_credits_balance > 0:
+    # User has subscription or successful payment → no expiry
+    from models import Payment, CreditTransaction
+    has_payment = db.query(Payment).filter(Payment.user_id == user.id, Payment.status == "success").first() is not None
+    has_admin_grant = db.query(CreditTransaction).filter(CreditTransaction.user_id == user.id, CreditTransaction.kind == "admin_grant").first() is not None
+
+    if user.subscription_tier_id or has_payment or has_admin_grant:
         return {"credit_type": "paid", "days_left": None, "is_expired": False}
 
     expiry_date = clip.created_at + timedelta(days=3)
