@@ -293,6 +293,39 @@ def preserve_free_clips(
     return PreserveFreeClipsOut(user_email=target.email, clips_converted=len(free_clips))
 
 
+class CleanupOut(BaseModel):
+    task_id: Optional[str] = None
+    mode: str  # "async" (queued to worker) | "sync" (ran inline)
+    result: Optional[dict] = None
+
+
+@router.post("/cleanup-expired", response_model=CleanupOut)
+def trigger_cleanup_expired(
+    sync: bool = Query(False, description="Run inline and return counts instead of queuing"),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    """Manually run the expired-free-clip sweep (same task beat runs at 02:00 UTC).
+
+    Default queues to the Celery worker (tests the deployed worker path). Pass
+    ?sync=true to run inline in the API process and get the deleted/purged counts
+    back immediately — handy for clearing the existing backlog on demand.
+    """
+    from tasks.cleanup import cleanup_expired_free_clips
+
+    log_admin(db, admin_user, "trigger_cleanup_expired",
+              target_type="task", target_id="cleanup_expired_free_clips",
+              payload={"sync": sync})
+    db.commit()
+
+    if sync:
+        result = cleanup_expired_free_clips.run()
+        return CleanupOut(mode="sync", result=result)
+
+    async_result = cleanup_expired_free_clips.delay()
+    return CleanupOut(mode="async", task_id=async_result.id)
+
+
 def _csv_response(filename: str, rows: list[dict], fieldnames: list[str]) -> StreamingResponse:
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")

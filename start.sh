@@ -15,6 +15,17 @@ if [ "${DISABLE_WORKER:-0}" != "1" ]; then
         --without-heartbeat &
     WORKER_PID=$!
     echo "[start.sh] celery pid=${WORKER_PID}"
+
+    if [ "${DISABLE_BEAT:-0}" != "1" ]; then
+        echo "[start.sh] launching celery beat"
+        celery -A celery_app beat \
+            --loglevel=INFO \
+            --schedule=/tmp/celerybeat-schedule &
+        BEAT_PID=$!
+        echo "[start.sh] beat pid=${BEAT_PID}"
+    else
+        echo "[start.sh] beat disabled via DISABLE_BEAT=1"
+    fi
 else
     echo "[start.sh] worker disabled via DISABLE_WORKER=1"
 fi
