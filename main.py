@@ -13,6 +13,7 @@ from api.music import router as music_router
 from api.debug import router as debug_router
 from api.payments import router as payments_router
 from api.subscriptions import router as subscriptions_router
+from api.system import router as system_router
 
 load_dotenv()
 
@@ -139,6 +140,7 @@ def health():
 
 
 app.include_router(auth_router, prefix="/api")
+app.include_router(system_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(jobs_router, prefix="/api")
 app.include_router(clips_router, prefix="/api")

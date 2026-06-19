@@ -15,6 +15,7 @@ from database import get_db
 from models import User, CreditTransaction, AdminLog, Job, Clip, SubscriptionTier, UserSubscription
 from auth import require_admin, create_access_token
 from services.credits import grant, log_admin, is_dev_mode
+from services.app_settings import load_app_settings, save_app_settings
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -97,6 +98,14 @@ class UnlockOut(BaseModel):
     user: AdminUserOut
 
 
+class AppSettingsOut(BaseModel):
+    maintenance_mode: bool
+
+
+class AppSettingsIn(BaseModel):
+    maintenance_mode: bool
+
+
 # ── Endpoints ────────────────────────────────────────────────
 
 _ADMIN_SYSTEM_EMAIL = "admin@system"
@@ -156,6 +165,32 @@ def stats(db: Session = Depends(get_db), _admin: User = Depends(require_admin)):
         total_credits_spent=total_credits_spent,
         dev_mode=is_dev_mode(),
     )
+
+
+@router.get("/settings", response_model=AppSettingsOut)
+def get_settings(_admin: User = Depends(require_admin)):
+    settings = load_app_settings()
+    return AppSettingsOut(maintenance_mode=bool(settings.get("maintenance_mode")))
+
+
+@router.patch("/settings", response_model=AppSettingsOut)
+def update_settings(
+    payload: AppSettingsIn,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    before = load_app_settings()
+    updated = save_app_settings({"maintenance_mode": payload.maintenance_mode})
+    log_admin(
+        db, admin_user, "set_maintenance_mode",
+        target_type="app", target_id="settings",
+        payload={
+            "before": bool(before.get("maintenance_mode")),
+            "after": bool(updated.get("maintenance_mode")),
+        },
+    )
+    db.commit()
+    return AppSettingsOut(maintenance_mode=bool(updated.get("maintenance_mode")))
 
 
 @router.get("/users", response_model=List[AdminUserOut])
