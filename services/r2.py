@@ -17,6 +17,7 @@ Env:
   R2_ACCESS_KEY_ID
   R2_SECRET_ACCESS_KEY
   R2_BUCKET             bucket name
+  R2_ENDPOINT_URL       optional full S3 endpoint override
   R2_PUBLIC_URL         optional, e.g. https://cdn.example.com (if bucket public)
   R2_REGION             defaults to "auto"
   R2_SIGNED_URL_TTL     seconds, default 3600
@@ -58,9 +59,13 @@ def get_client():
         if _client is not None:
             return _client
         account = os.environ["R2_ACCOUNT_ID"]
+        endpoint_url = os.getenv(
+            "R2_ENDPOINT_URL",
+            f"https://{account}.r2.cloudflarestorage.com",
+        ).rstrip("/")
         _client = boto3.client(
             "s3",
-            endpoint_url=f"https://{account}.r2.cloudflarestorage.com",
+            endpoint_url=endpoint_url,
             aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
             aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
             region_name=os.getenv("R2_REGION", "auto"),
