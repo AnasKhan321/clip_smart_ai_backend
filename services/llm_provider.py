@@ -5,10 +5,14 @@ OpenRouter remains the default so existing deployments keep working.
 """
 from __future__ import annotations
 
+import json
 import os
 from typing import Literal
 
+import google.auth
 import httpx
+from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from openai import OpenAI
 
 Purpose = Literal["json", "generate", "stream", "synthesize"]
@@ -45,6 +49,14 @@ def generate_text(
     provider = provider_name()
     model = model_for(purpose, openrouter_model, gemini_model)
     if provider == "gemini":
+        if _gemini_auth_mode() == "vertex":
+            return _generate_vertex_gemini(
+                prompt,
+                model=model,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                json_response=json_response,
+            )
         return _generate_gemini(
             prompt,
             model=model,
@@ -61,6 +73,15 @@ def generate_text(
             temperature=temperature,
         )
     raise RuntimeError(f"Unsupported LLM_PROVIDER={provider!r}; use openrouter or gemini")
+
+
+def _gemini_auth_mode() -> str:
+    mode = os.getenv("GEMINI_AUTH_MODE", "").strip().lower()
+    if mode:
+        return mode
+    if os.getenv("GOOGLE_CLOUD_PROJECT"):
+        return "vertex"
+    return "api_key"
 
 
 def _generate_openrouter(
@@ -104,6 +125,8 @@ def _generate_gemini(
         raise RuntimeError("GOOGLE_API_KEY or GEMINI_API_KEY not configured")
 
     generation_config: dict = {"maxOutputTokens": max_tokens}
+    if provider_name() == "gemini":
+        generation_config["thinkingConfig"] = {"thinkingBudget": 0}
     if temperature is not None:
         generation_config["temperature"] = temperature
     if json_response:
@@ -131,3 +154,74 @@ def _generate_gemini(
         raise RuntimeError(f"Gemini returned no candidates: {data}")
     parts = candidates[0].get("content", {}).get("parts") or []
     return "".join(str(part.get("text", "")) for part in parts).strip()
+
+
+def _generate_vertex_gemini(
+    prompt: str,
+    *,
+    model: str,
+    max_tokens: int,
+    temperature: float | None,
+    json_response: bool,
+) -> str:
+    project = os.getenv("GOOGLE_CLOUD_PROJECT", "").strip()
+    location = os.getenv("GOOGLE_CLOUD_LOCATION", "global").strip()
+    if not project:
+        raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for GEMINI_AUTH_MODE=vertex")
+
+    generation_config: dict = {"maxOutputTokens": max_tokens}
+    generation_config["thinkingConfig"] = {"thinkingBudget": 0}
+    if temperature is not None:
+        generation_config["temperature"] = temperature
+    if json_response:
+        generation_config["responseMimeType"] = "application/json"
+
+    payload = {
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": prompt}],
+            }
+        ],
+        "generationConfig": generation_config,
+    }
+
+    host = "aiplatform.googleapis.com" if location == "global" else f"{location}-aiplatform.googleapis.com"
+    url = (
+        f"https://{host}/v1/projects/{project}/locations/{location}"
+        f"/publishers/google/models/{model}:generateContent"
+    )
+
+    api_key = (
+        (os.getenv("GEMINI_HOOK_GEN_API_KEY") if model == os.getenv("GEMINI_HOOK_GEN_MODEL") else None)
+        or os.getenv("GOOGLE_API_KEY")
+        or os.getenv("GEMINI_API_KEY")
+    )
+
+    with httpx.Client(timeout=180) as client:
+        if api_key:
+            response = client.post(url, params={"key": api_key}, json=payload)
+        else:
+            credentials = _vertex_credentials()
+            credentials.refresh(Request())
+            headers = {"Authorization": f"Bearer {credentials.token}"}
+            response = client.post(url, headers=headers, json=payload)
+    if response.status_code >= 400:
+        raise RuntimeError(f"Vertex Gemini API error {response.status_code}: {response.text[:500]}")
+
+    data = response.json()
+    candidates = data.get("candidates") or []
+    if not candidates:
+        raise RuntimeError(f"Vertex Gemini returned no candidates: {data}")
+    parts = candidates[0].get("content", {}).get("parts") or []
+    return "".join(str(part.get("text", "")) for part in parts).strip()
+
+
+def _vertex_credentials():
+    scopes = ["https://www.googleapis.com/auth/cloud-platform"]
+    raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if raw:
+        info = json.loads(raw)
+        return service_account.Credentials.from_service_account_info(info, scopes=scopes)
+    credentials, _project = google.auth.default(scopes=scopes)
+    return credentials
