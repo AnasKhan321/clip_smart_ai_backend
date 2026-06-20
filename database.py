@@ -53,6 +53,8 @@ _PENDING_COLUMNS = [
     ("clips", "credit_type", "VARCHAR DEFAULT 'free'"),
     ("users", "topup_credits_balance", "INTEGER DEFAULT 0"),
     ("users", "subscription_tier_id", "INTEGER"),
+    ("users", "referral_code", "VARCHAR"),
+    ("users", "referred_by_user_id", "VARCHAR"),
 ]
 
 
@@ -71,3 +73,10 @@ def _apply_lightweight_migrations():
             if col in existing:
                 continue
             conn.execute(text(f'ALTER TABLE {table} ADD COLUMN {col} {coltype}'))
+
+        if insp.has_table("users"):
+            indexes = {idx["name"] for idx in insp.get_indexes("users")}
+            if "ix_users_referral_code" not in indexes:
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_referral_code ON users (referral_code)"))
+            if "ix_users_referred_by_user_id" not in indexes:
+                conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_referred_by_user_id ON users (referred_by_user_id)"))

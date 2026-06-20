@@ -18,7 +18,11 @@ def is_dev_mode() -> bool:
 
 
 def signup_bonus() -> int:
-    return int(os.getenv("SIGNUP_BONUS_CREDITS", 5))
+    return int(os.getenv("SIGNUP_BONUS_CREDITS", 3))
+
+
+def referral_bonus() -> int:
+    return int(os.getenv("REFERRAL_BONUS_CREDITS", 2))
 
 
 def cost_for_job(max_clips: int) -> int:

@@ -4,10 +4,10 @@ import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from openai import OpenAI
 from pathlib import Path
 from services.transcriber import load_transcript
 from services.diarizer import load_diarization, build_enriched_transcript
+from services.llm_provider import generate_text, model_for, provider_name
 
 logger = logging.getLogger(__name__)
 
@@ -64,17 +64,13 @@ def find_more_clips(job_id: str, excluded_clips: list, options: dict, progress_c
 
 def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
                   progress_callback=None, pre_selected: list = None) -> list:
-    client = OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    )
     chunks = _chunk_enriched(enriched, CHUNK_WINDOW_SECONDS)
     max_clips = options.get("max_clips", 5)
 
     if progress_callback:
         progress_callback(10)
 
-    all_candidates = _analyze_chunks_parallel(client, transcript, chunks, options,
+    all_candidates = _analyze_chunks_parallel(transcript, chunks, options,
                                               progress_callback, base_progress=10,
                                               span=70)
     all_candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
@@ -83,7 +79,7 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
     if not clips:
         options_relaxed = {**options, "_relaxed": True}
         all_relaxed = _analyze_chunks_parallel(
-            client, transcript, chunks, options_relaxed,
+            transcript, chunks, options_relaxed,
             progress_callback, base_progress=80, span=15,
         )
         all_relaxed.sort(key=lambda c: c.get("score", 0), reverse=True)
@@ -97,33 +93,40 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
     return clips
 
 
-def _llm_call(client: OpenAI, transcript: dict, chunk: list, options: dict) -> list:
+def _llm_call(transcript: dict, chunk: list, options: dict) -> list:
     """Single chunk → list of candidate dicts. Returns [] on failure.
 
     Retries up to _LLM_MAX_RETRIES times with exponential backoff to handle
     transient OpenRouter 429/500 errors that silently kill long-podcast analysis.
     """
     prompt = _build_prompt(transcript, chunk, options)
-    model = os.getenv("ANALYZER_MODEL", "anthropic/claude-sonnet-4-5")
+    model = model_for(
+        "json",
+        openrouter_default="anthropic/claude-sonnet-4-5",
+        gemini_default="gemini-3.5-flash",
+    )
+    provider = provider_name()
     max_tokens = int(os.getenv("ANALYZER_MAX_TOKENS", "4096"))
     chunk_start = chunk[0]["start"] if chunk else 0
     chunk_end = chunk[-1]["end"] if chunk else 0
     prompt_len = len(prompt)
 
     logger.info(
-        "LLM call: chunk %.0f-%.0fs, prompt_len=%d chars, model=%s, max_tokens=%d",
-        chunk_start, chunk_end, prompt_len, model, max_tokens,
+        "LLM call: chunk %.0f-%.0fs, prompt_len=%d chars, provider=%s, model=%s, max_tokens=%d",
+        chunk_start, chunk_end, prompt_len, provider, model, max_tokens,
     )
 
     last_exc = None
     for attempt in range(1, _LLM_MAX_RETRIES + 1):
         try:
-            response = client.chat.completions.create(
-                model=model,
+            raw = generate_text(
+                prompt,
+                purpose="json",
+                openrouter_model=model,
+                gemini_model=model,
                 max_tokens=max_tokens,
-                messages=[{"role": "user", "content": prompt}],
+                json_response=True,
             )
-            raw = response.choices[0].message.content or ""
             raw = raw.strip()
             logger.info(
                 "LLM response: chunk %.0f-%.0fs, response_len=%d chars (attempt %d)",
@@ -149,8 +152,8 @@ def _llm_call(client: OpenAI, transcript: dict, chunk: list, options: dict) -> l
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                "OpenRouter chunk call failed for %.0f-%.0fs (attempt %d/%d): %s",
-                chunk_start, chunk_end, attempt, _LLM_MAX_RETRIES, exc,
+                "%s chunk call failed for %.0f-%.0fs (attempt %d/%d): %s",
+                provider, chunk_start, chunk_end, attempt, _LLM_MAX_RETRIES, exc,
             )
 
         if attempt < _LLM_MAX_RETRIES:
@@ -165,7 +168,7 @@ def _llm_call(client: OpenAI, transcript: dict, chunk: list, options: dict) -> l
     return []
 
 
-def _analyze_chunks_parallel(client: OpenAI, transcript: dict, chunks: list,
+def _analyze_chunks_parallel(transcript: dict, chunks: list,
                               options: dict, progress_callback, base_progress: int,
                               span: int) -> list:
     """Dispatch all chunks in parallel via thread pool. Aggregates results.
@@ -187,7 +190,7 @@ def _analyze_chunks_parallel(client: OpenAI, transcript: dict, chunks: list,
     logger.info("Analyzing %d chunks with %d parallel workers", len(chunks), workers)
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [pool.submit(_llm_call, client, transcript, chunk, options)
+        futures = [pool.submit(_llm_call, transcript, chunk, options)
                    for chunk in chunks]
         from concurrent.futures import as_completed as _as_completed
         for fut in _as_completed(futures):
@@ -209,7 +212,7 @@ def _analyze_chunks_parallel(client: OpenAI, transcript: dict, chunks: list,
         logger.error(
             "ALL %d chunks returned zero candidates — LLM analysis produced nothing. "
             "This usually means the model is timing out, rate-limited, or returning "
-            "malformed JSON. Check OpenRouter dashboard for errors.",
+            "malformed JSON. Check the configured LLM provider dashboard for errors.",
             len(chunks),
         )
 

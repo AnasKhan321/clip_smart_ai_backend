@@ -1,7 +1,7 @@
 """Generate short viral hook text suggestions from a clip's transcript.
 
-Uses a small/cheap OpenRouter model (configurable via HOOK_GEN_MODEL,
-default google/gemini-2.5-flash-lite). Returns up to N strings.
+Uses the configured LLM provider. OpenRouter defaults to HOOK_GEN_MODEL;
+Gemini mode uses GEMINI_MODEL. Returns up to N strings.
 """
 from __future__ import annotations
 
@@ -11,20 +11,13 @@ import os
 import re
 from typing import List
 
-from openai import OpenAI
+from services.llm_provider import generate_text, model_for
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = os.getenv("HOOK_GEN_MODEL", "google/gemini-2.5-flash-lite")
 MAX_HOOKS = 4
 MAX_HOOK_CHARS = 90
-
-
-def _client() -> OpenAI:
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=os.getenv("OPENROUTER_API_KEY"),
-    )
 
 
 def _build_prompt(excerpt: str, existing_hook: str | None) -> str:
@@ -79,23 +72,26 @@ def _parse_lines(raw: str) -> List[str]:
 
 def generate_hooks(excerpt: str, existing_hook: str | None = None) -> List[str]:
     """Return up to MAX_HOOKS viral hook strings."""
-    if not os.getenv("OPENROUTER_API_KEY"):
-        raise RuntimeError("OPENROUTER_API_KEY not configured")
-
-    client = _client()
     prompt = _build_prompt(excerpt, existing_hook)
     try:
-        resp = client.chat.completions.create(
-            model=DEFAULT_MODEL,
+        model = model_for(
+            "generate",
+            openrouter_default=DEFAULT_MODEL,
+            gemini_default="gemini-3.1-flash-lite",
+        )
+        raw = generate_text(
+            prompt,
+            purpose="generate",
+            openrouter_model=model,
+            gemini_model=model,
             max_tokens=400,
             temperature=0.9,
-            messages=[{"role": "user", "content": prompt}],
         )
     except Exception as exc:
         logger.exception("hook generation LLM call failed")
         raise RuntimeError(f"LLM call failed: {exc}") from exc
 
-    raw = (resp.choices[0].message.content or "").strip()
+    raw = raw.strip()
     # some models wrap in code fences or JSON — handle both gracefully
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json|text)?\n?|\n?```$", "", raw).strip()

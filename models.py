@@ -25,6 +25,8 @@ class User(Base):
     is_admin = Column(Boolean, default=False, nullable=False)
     topup_credits_balance = Column(Integer, default=0, nullable=False)
     subscription_tier_id = Column(Integer, nullable=True)
+    referral_code = Column(String, unique=True, index=True, nullable=True)
+    referred_by_user_id = Column(String, ForeignKey("users.id"), nullable=True, index=True)
 
     is_active = Column(Boolean, default=True)
     is_email_verified = Column(Boolean, default=False, nullable=False)
@@ -59,6 +61,18 @@ class CreditTransaction(Base):
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     user = relationship("User", back_populates="credit_txns")
+
+
+class Referral(Base):
+    __tablename__ = "referrals"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    referrer_user_id = Column(String, ForeignKey("users.id"), nullable=False, index=True)
+    referred_user_id = Column(String, ForeignKey("users.id"), nullable=False, unique=True, index=True)
+    code = Column(String, nullable=False, index=True)
+    referrer_credits_awarded = Column(Integer, default=0, nullable=False)
+    referred_credits_awarded = Column(Integer, default=0, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
 
 class AdminLog(Base):

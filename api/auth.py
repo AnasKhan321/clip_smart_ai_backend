@@ -9,7 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User
+from models import Referral, User
 from auth import (
     hash_password,
     verify_password,
@@ -23,6 +23,7 @@ from auth import (
 )
 from services.credits import grant, signup_bonus
 from services.email import send_verification_email
+from services.referrals import apply_referral_signup, ensure_referral_code
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -32,6 +33,7 @@ class SignUpIn(BaseModel):
     email: EmailStr
     password: str = Field(min_length=8, max_length=128)
     name: Optional[str] = None
+    referral_code: Optional[str] = Field(None, max_length=64)
 
 
 class SignInIn(BaseModel):
@@ -42,6 +44,7 @@ class SignInIn(BaseModel):
 class GoogleSignInIn(BaseModel):
     id_token: Optional[str] = None
     access_token: Optional[str] = None
+    referral_code: Optional[str] = Field(None, max_length=64)
 
 
 class UserOut(BaseModel):
@@ -57,12 +60,19 @@ class UserOut(BaseModel):
     is_email_verified: bool
     created_at: datetime
     subscription_tier_name: Optional[str] = None
+    referral_code: Optional[str] = None
 
 
 class AuthOut(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+
+
+class ReferralOut(BaseModel):
+    referral_code: str
+    successful_referrals: int
+    credits_earned: int
 
 
 # ── Endpoints ────────────────────────────────────────────────
@@ -87,10 +97,12 @@ def signup(payload: SignUpIn, background_tasks: BackgroundTasks, db: Session = D
         user.is_email_verified = True
 
     db.flush()
+    ensure_referral_code(db, user)
 
     bonus = signup_bonus()
     if bonus > 0:
         grant(db, user, bonus, kind="signup_bonus", note="Welcome bonus")
+    apply_referral_signup(db, user, payload.referral_code, referred_credits_awarded=bonus)
 
     db.commit()
     db.refresh(user)
@@ -116,6 +128,7 @@ def signin(payload: SignInIn, db: Session = Depends(get_db)):
 
     if is_admin_email(user.email) and not user.is_admin:
         user.is_admin = True
+    ensure_referral_code(db, user)
     user.last_login_at = datetime.utcnow()
     db.commit()
     db.refresh(user)
@@ -158,6 +171,7 @@ def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
         if is_admin_email(user.email) and not user.is_admin:
             user.is_admin = True
         user.is_email_verified = True
+        ensure_referral_code(db, user)
     else:
         user = User(
             email=info["email"],
@@ -170,12 +184,14 @@ def google_signin(payload: GoogleSignInIn, db: Session = Depends(get_db)):
         )
         db.add(user)
         db.flush()
+        ensure_referral_code(db, user)
         new_user = True
 
     if new_user:
         bonus = signup_bonus()
         if bonus > 0:
             grant(db, user, bonus, kind="signup_bonus", note="Welcome bonus (Google)")
+        apply_referral_signup(db, user, payload.referral_code, referred_credits_awarded=bonus)
 
     user.last_login_at = datetime.utcnow()
     try:
@@ -208,12 +224,14 @@ def dev_login(db: Session = Depends(get_db)):
         )
         db.add(user)
         db.flush()
+        ensure_referral_code(db, user)
         bonus = signup_bonus()
         if bonus > 0:
             grant(db, user, bonus, kind="signup_bonus", note="Dev account")
         db.commit()
         db.refresh(user)
     else:
+        ensure_referral_code(db, user)
         user.is_email_verified = True
         user.last_login_at = datetime.utcnow()
         db.commit()
@@ -223,8 +241,29 @@ def dev_login(db: Session = Depends(get_db)):
 
 
 @router.get("/me", response_model=UserOut)
-def me(user: User = Depends(get_current_user)):
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    ensure_referral_code(db, user)
+    db.commit()
+    db.refresh(user)
     return UserOut.model_validate(user)
+
+
+@router.get("/referral", response_model=ReferralOut)
+def referral(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    code = ensure_referral_code(db, user)
+    successful_referrals = db.query(Referral).filter(Referral.referrer_user_id == user.id).count()
+    credits_earned = (
+        db.query(func.coalesce(func.sum(Referral.referrer_credits_awarded), 0))
+        .filter(Referral.referrer_user_id == user.id)
+        .scalar()
+        or 0
+    )
+    db.commit()
+    return ReferralOut(
+        referral_code=code,
+        successful_referrals=successful_referrals,
+        credits_earned=credits_earned,
+    )
 
 
 @router.post("/verify-email", response_model=UserOut)

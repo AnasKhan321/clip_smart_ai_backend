@@ -462,7 +462,7 @@ def run_full_pipeline(self, job_id: str, options: dict):
                 logger.error(
                     "Zero clips from a %.0f-minute video (job %s). "
                     "This is likely an LLM analysis failure, not a content quality issue. "
-                    "Check analyzer logs for OpenRouter errors.",
+                    "Check analyzer logs for provider errors.",
                     duration / 60, job_id,
                 )
                 _set_job_status(
