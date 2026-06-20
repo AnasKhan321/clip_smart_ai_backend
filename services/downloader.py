@@ -209,7 +209,19 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
         progress_callback(80)
 
     local_path = job_dir / f"original.{ext}"
-    r2.download_file(r2_key, str(local_path))
+    try:
+        r2.download_file(r2_key, str(local_path))
+    except Exception as exc:
+        direct_url = data.get("download_url") or data.get("file_url")
+        if direct_url:
+            _download_direct_url(direct_url, local_path)
+        else:
+            raise RuntimeError(
+                "Download service returned R2 key "
+                f"{r2_key!r}, but backend could not fetch it from R2. "
+                "Make sure the download service and backend use the same "
+                "R2 account, bucket, credentials, and public URL."
+            ) from exc
 
     if progress_callback:
         progress_callback(100)
@@ -220,6 +232,27 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
         "video_path": str(local_path),
         "audio_path": str(job_dir / "audio.wav"),
     }
+
+
+def _download_direct_url(url: str, local_path: Path) -> None:
+    import httpx
+
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = local_path.with_suffix(f"{local_path.suffix}.tmp")
+    try:
+        with httpx.stream("GET", url, timeout=180, follow_redirects=True) as resp:
+            resp.raise_for_status()
+            with open(tmp_path, "wb") as f:
+                for chunk in resp.iter_bytes():
+                    if chunk:
+                        f.write(chunk)
+        tmp_path.replace(local_path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:
