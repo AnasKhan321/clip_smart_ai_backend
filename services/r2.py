@@ -66,7 +66,7 @@ def get_client():
             region_name=os.getenv("R2_REGION", "auto"),
             config=Config(
                 signature_version="s3v4",
-                s3={"addressing_style": "virtual"},
+                s3={"addressing_style": "path"},
                 retries={"max_attempts": 3, "mode": "standard"},
             ),
         )
