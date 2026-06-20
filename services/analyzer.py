@@ -355,6 +355,8 @@ VIDEO METADATA:
 - Language: {language}
 {clip_types_line}
 - Duration Range: {min_dur}s – {max_dur}s per clip
+- Hard limit: end_seconds - start_seconds MUST be <= {max_dur}. Never return a clip longer than {max_dur} seconds.
+- Any clip longer than {max_dur} seconds is INVALID and will be rejected by the system.
 
 ---
 
@@ -388,6 +390,9 @@ Score 0.9+ only for moments that are genuinely exceptional. Be honest and critic
 ---
 
 CLIP BOUNDARY RULES:
+- NON-NEGOTIABLE: end_seconds - start_seconds must be >= {min_dur} and <= {max_dur}. Recalculate every candidate before returning JSON.
+- If the full idea is longer than {max_dur}s, return only the strongest continuous {max_dur}s-or-less section.
+- Do not solve duration by stitching multiple sections. Use one continuous timestamp range only.
 - Start 1–2s BEFORE the key moment (viewer needs just enough context)
 - End 1–2s AFTER the thought is complete (let it land)
 - Never cut mid-sentence unless the speaker is being interrupted (that's fine — tension)
@@ -415,7 +420,12 @@ OUTPUT: Respond ONLY with a valid JSON array. No explanation, no markdown, no pr
   }}
 ]
 
-Return up to {max_clips} clips ranked by score. Only include clips scoring above {threshold}. Be selective — 3 great clips beat 5 mediocre ones.
+Before finalizing, verify every object satisfies:
+- end_seconds > start_seconds
+- end_seconds - start_seconds >= {min_dur}
+- end_seconds - start_seconds <= {max_dur}
+
+Return up to {max_clips} clips ranked by score. Only include clips scoring above {threshold}. Be selective — 3 great clips beat 5 mediocre ones. Do not include any object that violates the duration rules.
 """
 
 

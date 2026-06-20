@@ -251,7 +251,8 @@ def _render_clips_parallel(db, job_id: str, clips: list, aspect_ratio: str,
 
 
 def _insert_candidate_clips(db, job_id: str, candidates: list,
-                             video_duration: float, rank_offset: int = 0) -> list:
+                             video_duration: float, rank_offset: int = 0,
+                             options: dict | None = None) -> list:
     """Validate + insert clip candidates. Returns the new Clip rows."""
     from models import Payment, CreditTransaction
     job = db.query(Job).filter(Job.id == job_id).first()
@@ -263,6 +264,10 @@ def _insert_candidate_clips(db, job_id: str, candidates: list,
             has_admin_grant = db.query(CreditTransaction).filter(CreditTransaction.user_id == user.id, CreditTransaction.kind == "admin_grant").first() is not None
             if user.subscription_tier_id or has_payment or has_admin_grant:
                 credit_type = "paid"
+
+    options = options or {}
+    min_clip_duration = float(options.get("min_clip_duration", 1))
+    max_clip_duration = float(options.get("max_clip_duration", 90))
 
     new_rows = []
     for i, candidate in enumerate(candidates):
@@ -278,6 +283,18 @@ def _insert_candidate_clips(db, job_id: str, candidates: list,
             continue
         duration = end - start
         if duration < 1:
+            continue
+        if duration < min_clip_duration:
+            logger.warning(
+                "dropping too-short clip candidate %.1f-%.1fs (%.1fs < %.1fs)",
+                start, end, duration, min_clip_duration,
+            )
+            continue
+        if duration > max_clip_duration:
+            logger.warning(
+                "dropping too-long clip candidate %.1f-%.1fs (%.1fs > %.1fs)",
+                start, end, duration, max_clip_duration,
+            )
             continue
         tags = json.dumps(candidate.get("tags", []))
         clip = Clip(
@@ -454,6 +471,7 @@ def run_full_pipeline(self, job_id: str, options: dict):
         clips = _insert_candidate_clips(
             db, job_id, clip_candidates,
             video_duration=job.video_duration_seconds or 0,
+            options=analysis_options,
         )
 
         if not clips:
@@ -536,6 +554,7 @@ def run_more_clips(self, job_id: str, options: dict, excluded_clips: list):
             db, job_id, new_candidates,
             video_duration=job.video_duration_seconds or 0,
             rank_offset=existing_count,
+            options=analysis_options,
         )
         if not clips:
             _set_job_status(db, job_id, "ready", 100)
