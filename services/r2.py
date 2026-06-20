@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import boto3
+import httpx
 from botocore.client import Config
 from botocore.exceptions import ClientError
 
@@ -201,9 +202,13 @@ def download_file(key: str, local_path: str) -> str:
         use_threads=True,
     )
     Path(local_path).parent.mkdir(parents=True, exist_ok=True)
-    get_client().download_file(
-        Bucket=bucket(), Key=key, Filename=local_path, Config=cfg,
-    )
+    try:
+        get_client().download_file(
+            Bucket=bucket(), Key=key, Filename=local_path, Config=cfg,
+        )
+    except Exception:
+        if not _download_public_object(key, local_path):
+            raise
     return local_path
 
 
@@ -211,7 +216,50 @@ def object_exists(key: str) -> bool:
     try:
         get_client().head_object(Bucket=bucket(), Key=key)
         return True
-    except ClientError:
+    except Exception:
+        return _public_object_exists(key)
+
+
+def _public_url_for_key(key: str) -> str:
+    pub = os.getenv("R2_PUBLIC_URL", "").rstrip("/")
+    return f"{pub}/{key}" if pub else ""
+
+
+def _public_object_exists(key: str) -> bool:
+    url = _public_url_for_key(key)
+    if not url:
+        return False
+    try:
+        with httpx.Client(timeout=20, follow_redirects=True) as client:
+            resp = client.head(url)
+            if resp.status_code == 405:
+                resp = client.get(url, headers={"Range": "bytes=0-0"})
+            return resp.status_code in (200, 206)
+    except Exception:
+        return False
+
+
+def _download_public_object(key: str, local_path: str) -> bool:
+    url = _public_url_for_key(key)
+    if not url:
+        return False
+    try:
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = f"{local_path}.tmp"
+        with httpx.stream("GET", url, timeout=180, follow_redirects=True) as resp:
+            if resp.status_code != 200:
+                return False
+            with open(tmp_path, "wb") as f:
+                for chunk in resp.iter_bytes():
+                    if chunk:
+                        f.write(chunk)
+        os.replace(tmp_path, local_path)
+        return True
+    except Exception:
+        try:
+            os.remove(f"{local_path}.tmp")
+        except OSError:
+            pass
         return False
 
 
