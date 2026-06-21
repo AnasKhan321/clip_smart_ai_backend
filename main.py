@@ -34,6 +34,7 @@ async def lifespan(app: FastAPI):
     # Reset any "exporting" clips left over from a prior worker crash. Without
     # this they stay stuck forever and the frontend polls until timeout.
     _reset_stale_exports()
+    _reset_stale_jobs()
     # Purge expired video cache entries
     _purge_video_cache()
     # Seed subscription tiers
@@ -75,6 +76,40 @@ def _reset_stale_exports() -> None:
             logger.warning("startup sweeper: reset %d stuck 'exporting' clips", count)
     except Exception as exc:
         logger.exception("startup sweeper failed: %s", exc)
+    finally:
+        s.close()
+
+
+def _reset_stale_jobs() -> None:
+    """Mark jobs stuck in active statuses as failed on startup.
+
+    Celery re-queues tasks on worker restart (task_acks_late=True), but if
+    Redis flushed or the worker died permanently the job stays in-flight forever.
+    30-min cutoff: any legitimate job still alive after restart will re-report
+    its own status update quickly.
+    """
+    import datetime
+    import logging
+    from database import SessionLocal
+    from models import Job
+    logger = logging.getLogger(__name__)
+    active = ["pending", "downloading", "transcribing", "diarizing", "analyzing", "clipping"]
+    cutoff = datetime.datetime.utcnow() - datetime.timedelta(minutes=30)
+    s = SessionLocal()
+    try:
+        stuck = s.query(Job).filter(
+            Job.status.in_(active),
+            Job.created_at < cutoff,
+        ).all()
+        if not stuck:
+            return
+        for job in stuck:
+            job.status = "failed"
+            job.error_message = "Job interrupted (worker restart)"
+        s.commit()
+        logger.warning("startup sweeper: reset %d stuck jobs", len(stuck))
+    except Exception as exc:
+        logger.exception("job sweeper failed: %s", exc)
     finally:
         s.close()
 
