@@ -157,6 +157,111 @@ def send_verification_email(email: str, name: str, token: str):
         print(f"SMTP error. Email verification fallback URL: {verification_link}", flush=True)
 
 
+def send_job_completed_email(email: str, name: str, job_id: str, kind: str):
+    """Send notification when a job reaches a terminal state.
+
+    kind: "ready" | "no_clips" | "failed"
+    """
+    review_link = f"{FRONTEND_URL}/review/{job_id}"
+    home_link = FRONTEND_URL
+
+    if kind == "ready":
+        subject = "Your clips are ready on VibeClip!"
+        headline = "Your clips are ready"
+        body = "Your video has been processed and your viral clips are ready to review and download."
+        cta_label = "View Clips"
+        cta_url = review_link
+        border_color = "#06b6d4"
+        header_color = "#f1f5f9"
+    elif kind == "no_clips":
+        subject = "VibeClip: No clip-worthy moments found"
+        headline = "Processing complete — no clips found"
+        body = "Your video was analyzed but no strong clip-worthy moments were detected. Try a different video or regenerate with different settings."
+        cta_label = "Try Another Video"
+        cta_url = home_link
+        border_color = "#f59e0b"
+        header_color = "#fef3c7"
+    else:  # failed
+        subject = "VibeClip: Processing failed"
+        headline = "Processing failed"
+        body = "Something went wrong while processing your video. Your credits have been refunded. Please try again."
+        cta_label = "Try Again"
+        cta_url = home_link
+        border_color = "#dc2626"
+        header_color = "#fca5a5"
+
+    html_content = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; background-color: #0a0f14; color: #e2e8f0; padding: 30px; margin: 0;">
+        <div style="max-width: 500px; margin: 0 auto; background-color: #0d1520; border: 1px solid {border_color}; border-radius: 16px; padding: 32px; box-shadow: 0 10px 40px -5px rgba(6, 182, 212, 0.08);">
+          <div style="text-align: center; margin-bottom: 28px;">
+            <span style="font-size: 26px; font-weight: 900; background: linear-gradient(135deg, #22d3ee 0%, #06b6d4 50%, #0891b2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; letter-spacing: 0.5px;">VibeClip</span>
+          </div>
+          <div style="height: 1px; background: linear-gradient(90deg, transparent, {border_color}, transparent); margin-bottom: 28px;"></div>
+          <h2 style="font-size: 20px; font-weight: 700; margin-top: 0; margin-bottom: 10px; color: {header_color};">{headline}</h2>
+          <p style="font-size: 14px; line-height: 22px; color: #94a3b8; margin-bottom: 28px;">
+            Hi {name},<br><br>{body}
+          </p>
+          <div style="text-align: center; margin-bottom: 28px;">
+            <a href="{cta_url}" style="display: inline-block; background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%); color: #ffffff; font-weight: 700; font-size: 14px; text-decoration: none; padding: 13px 32px; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(6, 182, 212, 0.45); letter-spacing: 0.3px;">{cta_label}</a>
+          </div>
+          <hr style="border: 0; border-top: 1px solid #1a2d3d; margin-bottom: 16px;">
+          <p style="font-size: 11px; line-height: 16px; color: #334155; margin: 0; text-align: center;">
+            You're receiving this because you submitted a video on VibeClip.
+          </p>
+        </div>
+      </body>
+    </html>
+    """
+
+    if RESEND_API_KEY:
+        try:
+            import httpx
+            resend_sender = RESEND_SENDER or SMTP_SENDER
+            if not resend_sender or "@gmail.com" in resend_sender.lower():
+                resend_sender = "VibeClip <noreply@vibeclip.in>"
+            resp = httpx.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={"from": resend_sender, "to": email, "subject": subject, "html": html_content},
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Job completion email ({kind}) sent to {email} via Resend")
+                return
+            else:
+                logger.error(f"Resend error ({resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"Resend job completion email failed: {e}")
+            if not SMTP_HOST:
+                return
+
+    if not SMTP_HOST:
+        logger.info(f"DEV: job completion email ({kind}) for {email} — {cta_url}")
+        return
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_SENDER
+        msg["To"] = email
+        msg.attach(MIMEText(f"Hi {name},\n\n{body}\n\n{cta_url}", "plain"))
+        msg.attach(MIMEText(html_content, "html"))
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+            if SMTP_USE_TLS:
+                server.starttls()
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.sendmail(SMTP_SENDER, email, msg.as_string())
+        server.quit()
+        logger.info(f"Job completion email ({kind}) sent to {email} via SMTP")
+    except Exception as e:
+        logger.error(f"SMTP job completion email failed for {email}: {e}")
+
+
 def send_payment_failed_email(email: str, name: str, subscription_tier: str, reason: str = "unknown"):
     """Send notification when subscription/payment fails."""
     subject = "Subscription payment failed — Update your payment method"

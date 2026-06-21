@@ -81,6 +81,22 @@ def _set_job_status(db, job_id: str, status: str, progress: int = 0,
         job.completed_at = datetime.utcnow()
     db.commit()
 
+    # ponytail: best-effort email, never blocks pipeline
+    if status in ("ready", "failed"):
+        try:
+            from services.email import send_job_completed_email
+            user = db.query(User).filter(User.id == job.user_id).first()
+            if user:
+                if status == "failed":
+                    kind = "failed"
+                elif job.error_message:
+                    kind = "no_clips"
+                else:
+                    kind = "ready"
+                send_job_completed_email(user.email, user.name or user.email, job_id, kind)
+        except Exception:
+            logger.exception("job completion email failed for %s", job_id)
+
 
 def _refund_failed_job(db, job_id: str):
     """Refund any net-outstanding deduct on this job.
