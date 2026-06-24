@@ -46,5 +46,9 @@ celery.conf.update(
             "task": "cleanup_expired_free_clips",
             "schedule": crontab(hour=2, minute=0),  # Daily at 2 AM UTC
         },
+        "reengagement-emails": {
+            "task": "send_reengagement_emails",
+            "schedule": crontab(hour=10, minute=0),  # Daily at 10 AM UTC
+        },
     },
 )

@@ -7,6 +7,7 @@ from database import SessionLocal
 from models import Clip, Job, User, Payment, CreditTransaction
 from services import r2
 from services.downloader import get_job_dir
+from services.email import send_reengagement_email
 
 
 def _remove_local_file(path: str | None) -> None:
@@ -99,6 +100,44 @@ def cleanup_expired_free_clips(self):
     except Exception as e:
         db.rollback()
         print(f"Cleanup task failed: {e}")
+        return {"status": "failed", "error": str(e)}
+    finally:
+        db.close()
+
+
+@shared_task(bind=True, name="send_reengagement_emails")
+def send_reengagement_emails(self):
+    """Email users who signed up 24-48 h ago and have never submitted a job."""
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        window_start = now - timedelta(hours=48)
+        window_end = now - timedelta(hours=24)
+
+        # Users created in the 24-48 h window with no jobs at all
+        users_with_jobs = db.query(Job.user_id).filter(Job.user_id.isnot(None)).distinct().subquery()
+        candidates = (
+            db.query(User)
+            .filter(
+                User.created_at >= window_start,
+                User.created_at < window_end,
+                User.is_active == True,
+                ~User.id.in_(users_with_jobs),
+            )
+            .all()
+        )
+
+        sent = 0
+        for user in candidates:
+            try:
+                send_reengagement_email(user.email, user.name or "there")
+                sent += 1
+            except Exception as e:
+                print(f"Reengagement email failed for {user.email}: {e}")
+
+        return {"status": "success", "sent": sent}
+    except Exception as e:
+        print(f"Reengagement task failed: {e}")
         return {"status": "failed", "error": str(e)}
     finally:
         db.close()

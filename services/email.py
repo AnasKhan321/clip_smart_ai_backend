@@ -367,3 +367,100 @@ def send_payment_failed_email(email: str, name: str, subscription_tier: str, rea
         logger.info(f"Payment failure notification sent to {email}")
     except Exception as e:
         logger.error(f"Failed to send payment failure email to {email}: {e}")
+
+
+def _send_via_resend_or_smtp(to_email: str, subject: str, html_content: str, text_content: str) -> None:
+    """Shared send helper — tries Resend API first, falls back to SMTP."""
+    if RESEND_API_KEY:
+        try:
+            import httpx
+            sender = RESEND_SENDER or SMTP_SENDER
+            if not sender or "@gmail.com" in sender.lower():
+                sender = "VibeClip <noreply@vibeclip.in>"
+            resp = httpx.post(
+                "https://api.resend.com/emails",
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}", "Content-Type": "application/json"},
+                json={"from": sender, "to": to_email, "subject": subject, "html": html_content},
+                timeout=15,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Email '{subject}' sent to {to_email} via Resend")
+                return
+            logger.error(f"Resend error ({resp.status_code}): {resp.text}")
+        except Exception as e:
+            logger.error(f"Resend send failed: {e}")
+            if not SMTP_HOST:
+                return
+
+    if not SMTP_HOST:
+        logger.info(f"DEV: would send '{subject}' to {to_email}")
+        return
+
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_SENDER
+        msg["To"] = to_email
+        msg.attach(MIMEText(text_content, "plain"))
+        msg.attach(MIMEText(html_content, "html"))
+        if SMTP_PORT == 465:
+            server = smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, timeout=10)
+        else:
+            server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=10)
+            if SMTP_USE_TLS:
+                server.starttls()
+        if SMTP_USERNAME and SMTP_PASSWORD:
+            server.login(SMTP_USERNAME, SMTP_PASSWORD)
+        server.sendmail(SMTP_SENDER, to_email, msg.as_string())
+        server.quit()
+        logger.info(f"Email '{subject}' sent to {to_email} via SMTP")
+    except Exception as e:
+        logger.error(f"SMTP send failed for {to_email}: {e}")
+
+
+def send_reengagement_email(email: str, name: str) -> None:
+    """Send a nudge to users who signed up but haven't submitted any video yet."""
+    home_link = FRONTEND_URL
+    subject = "Your first clip is waiting — start for free on VibeClip"
+    html_content = f"""
+    <html>
+      <body style="font-family: Arial, sans-serif; background-color: #0a0f14; color: #e2e8f0; padding: 30px; margin: 0;">
+        <div style="max-width: 500px; margin: 0 auto; background-color: #0d1520; border: 1px solid #1a2d3d; border-radius: 16px; padding: 32px; box-shadow: 0 10px 40px -5px rgba(6, 182, 212, 0.08);">
+          <div style="text-align: center; margin-bottom: 28px;">
+            <span style="font-size: 26px; font-weight: 900; background: linear-gradient(135deg, #22d3ee 0%, #06b6d4 50%, #0891b2 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; letter-spacing: 0.5px;">VibeClip</span>
+          </div>
+          <div style="height: 1px; background: linear-gradient(90deg, transparent, #06b6d4, transparent); margin-bottom: 28px;"></div>
+          <h2 style="font-size: 20px; font-weight: 700; margin-top: 0; margin-bottom: 10px; color: #f1f5f9;">Your clips won't make themselves 🎬</h2>
+          <p style="font-size: 14px; line-height: 22px; color: #94a3b8; margin-bottom: 28px;">
+            Hi {name},<br><br>
+            You signed up for VibeClip yesterday but haven't tried it yet. Paste any YouTube link or upload a video — we'll find the viral moments and cut them into ready-to-post short clips in minutes.
+          </p>
+          <div style="background-color: #0a1929; border: 1px solid #1a3a5c; border-radius: 10px; padding: 16px; margin-bottom: 28px;">
+            <p style="font-size: 13px; color: #64b5f6; font-weight: 600; margin: 0 0 8px 0;">How it works:</p>
+            <ol style="font-size: 13px; color: #94a3b8; margin: 0; padding-left: 18px; line-height: 22px;">
+              <li>Paste a YouTube URL or upload your video</li>
+              <li>AI finds the best viral moments (15–60 sec each)</li>
+              <li>Download ready-to-post vertical clips for TikTok, Reels &amp; Shorts</li>
+            </ol>
+          </div>
+          <div style="text-align: center; margin-bottom: 28px;">
+            <a href="{home_link}" style="display: inline-block; background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%); color: #ffffff; font-weight: 700; font-size: 14px; text-decoration: none; padding: 13px 32px; border-radius: 10px; box-shadow: 0 4px 20px -2px rgba(6, 182, 212, 0.45); letter-spacing: 0.3px;">
+              Make My First Clip
+            </a>
+          </div>
+          <hr style="border: 0; border-top: 1px solid #1a2d3d; margin-bottom: 16px;">
+          <p style="font-size: 11px; line-height: 16px; color: #334155; margin: 0; text-align: center;">
+            You're receiving this because you created an account on VibeClip.
+          </p>
+        </div>
+      </body>
+    </html>
+    """
+    text_content = (
+        f"Hi {name},\n\n"
+        "You signed up for VibeClip but haven't created a clip yet.\n\n"
+        "Paste any YouTube URL and we'll find the viral moments and cut them into "
+        "TikTok/Reels/Shorts-ready clips.\n\n"
+        f"Get started: {home_link}\n"
+    )
+    _send_via_resend_or_smtp(email, subject, html_content, text_content)
