@@ -303,11 +303,16 @@ ANTI-PATTERNS — avoid these (they kill retention):
 - Clip starts with greetings, intros, or "aaj hum baat karenge..."
 - Long setup with no payoff within first 10 seconds
 - Clip ends mid-sentence or mid-thought
+- Clip keeps running AFTER the payoff — trailing explanation, examples, or "so basically..." recap kills the replay
 - Content only makes sense if you've watched the full episode
 - Speaker trailing off, long pauses, filler-heavy sections
 - Pure information with no opinion, story, or emotion
 """
 
+    # Indian cultural guidance only helps when the content is actually Indian —
+    # for other content it biases scoring and wastes prompt tokens.
+    indian_langs = {"hi", "ur", "pa", "bn", "ta", "te", "mr", "gu", "kn", "ml"}
+    is_indian_content = language in indian_langs
     cultural_context = """
 INDIAN CONTENT CULTURAL DEPTH:
 - **Health myths**: Claims contradicting "ghee is bad", "rice makes you fat", "protein only from meat" → extremely viral
@@ -323,6 +328,12 @@ INDIAN CONTENT CULTURAL DEPTH:
 - **Startup/hustle culture**: Failure stories, funding amounts, "bootstrapped to ₹X crore" → aspirational shares
 - **Religious/spiritual claims**: High controversy potential, score carefully based on framing
 - **Desi vs. foreign**: Any content that challenges "videshi cheez better hai" or reveals India produces something the world uses → pride + share
+"""
+    if not is_indian_content:
+        cultural_context = """CULTURAL CONTEXT:
+- Match the audience of the video's language and subject. Score cultural resonance for THAT audience, not a generic one.
+- Universal share triggers: insider knowledge ("nobody tells you this"), money reveals, expert contradicting popular advice, David-vs-Goliath stories, specific numbers that reframe something familiar.
+- Natural code-switching or accents are authenticity markers — never penalize them.
 """
 
     # Build dynamic sections that change when a custom prompt is provided
@@ -341,7 +352,10 @@ INDIAN CONTENT CULTURAL DEPTH:
         intent_block = ""
         clip_types_line = f"- Clip Types to Find: {', '.join(clip_types)}"
 
-    return f"""You are a world-class short-form content strategist who has studied thousands of viral Indian Reels, YouTube Shorts, and podcast clips. You understand the psychology of why Indian audiences stop scrolling, watch till the end, and hit share.
+    audience = "Indian audiences" if is_indian_content else "audiences"
+    corpus = "viral Indian Reels" if is_indian_content else "viral Reels"
+
+    return f"""You are a world-class short-form content strategist who has studied thousands of {corpus}, YouTube Shorts, and podcast clips. You understand the psychology of why {audience} stop scrolling, watch till the end, and hit share.
 
 {task_line}
 
@@ -391,6 +405,10 @@ Score 0.9+ only for moments that are genuinely exceptional. Be honest and critic
 
 CLIP BOUNDARY RULES:
 - NON-NEGOTIABLE: end_seconds - start_seconds must be >= {min_dur} and <= {max_dur}. Recalculate every candidate before returning JSON.
+- SHORTER WINS. Target the short end of the range. A tight {min_dur}-40s clip beats a padded one every time — virality dies with every extra second of explanation.
+- END AT THE PAYOFF. The clip ends 1-2s after the punchline / reveal / strongest line. If the speaker keeps explaining, elaborating, or giving examples after the payoff — CUT ALL OF IT. The viewer replays a punchy clip; they scroll past an explanation.
+- Test every clip: could you remove the last 10 seconds and keep the impact? If yes, remove them.
+- Only use the upper half of the duration range when unresolved tension or a story arc genuinely holds attention the whole way.
 - If the full idea is longer than {max_dur}s, return only the strongest continuous {max_dur}s-or-less section.
 - Do not solve duration by stitching multiple sections. Use one continuous timestamp range only.
 - Start 1–2s BEFORE the key moment (viewer needs just enough context)
@@ -398,6 +416,9 @@ CLIP BOUNDARY RULES:
 - Never cut mid-sentence unless the speaker is being interrupted (that's fine — tension)
 - For myth_bust and shocking_stat: ALWAYS include both the setup AND the reveal
 - For story_arc: must have a clear beginning AND resolution within the clip window
+- The hook must land within the FIRST 3 SECONDS of the clip. If the strongest line is buried 10s in, move start_seconds so the clip opens on or just before it.
+- Clips must NOT overlap each other in time. If two candidates overlap, keep only the stronger one.
+- Prefer variety: if two candidates score equally, pick the one whose clip_type is not already used.
 - Ideal clip: starts with something that makes you lean in, ends with something that makes you think
 
 ---
@@ -411,9 +432,9 @@ OUTPUT: Respond ONLY with a valid JSON array. No explanation, no markdown, no pr
     "end_seconds": 187.2,
     "clip_type": "shocking_stat",
     "score": 0.91,
-    "hook_line": "The exact opening words that will hook the viewer (first sentence of clip)",
+    "hook_line": "VERBATIM opening words of the clip, copied exactly from the transcript — never paraphrase",
     "reason": "Specific explanation of WHY this moment is viral — reference the hook, the tension, the emotional trigger, and the cultural resonance",
-    "transcript_excerpt": "Exact words spoken in this segment (first 2-3 sentences)",
+    "transcript_excerpt": "VERBATIM words from the transcript for this segment (first 2-3 sentences) — never invent or clean up",
     "retention_reason": "Why will someone watch this till the end?",
     "share_trigger": "What specific thing will make someone share this?",
     "tags": ["health", "indian-diet", "shocking"]
