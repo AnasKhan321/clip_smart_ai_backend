@@ -84,6 +84,12 @@ def update_clip(
 ):
     clip = _owned_clip(clip_id, db, user)
 
+    if clip.status == "expired_deleted":
+        raise HTTPException(
+            status_code=410,
+            detail="This clip has expired and its source video has been deleted. Editing is no longer possible."
+        )
+
     # Validate trim bounds
     new_start = body.user_start_seconds if body.user_start_seconds is not None \
         else clip.user_start_seconds

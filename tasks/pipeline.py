@@ -21,7 +21,7 @@ from services.video_cache import required_quality, get_cache_hit, touch_cache, s
 logger = logging.getLogger(__name__)
 
 
-@celery.task(bind=True, name="tasks.test_download")
+@celery.task(bind=True, name="tasks.test_download", ignore_result=False)
 def test_download_task(self, url: str) -> dict:
     import time, shutil, tempfile, socket, uuid
     from services.downloader import _download_via_webshare, _write_cookies_tempfile
@@ -336,7 +336,7 @@ def _insert_candidate_clips(db, job_id: str, candidates: list,
 
 # ── Main pipeline task ──────────────────────────────────────────────────────
 
-@celery.task(bind=True, name="tasks.pipeline.run_full_pipeline")
+@celery.task(bind=True, name="tasks.pipeline.run_full_pipeline", ignore_result=True)
 def run_full_pipeline(self, job_id: str, options: dict):
     db = SessionLocal()
     try:
@@ -399,11 +399,21 @@ def run_full_pipeline(self, job_id: str, options: dict):
                 # Mirror original to R2 in background (for clip re-runs on fresh workers)
                 if r2.is_enabled() and meta.get("video_path"):
                     key = r2.source_key(job_id)
-                    r2.upload_in_background(meta["video_path"], key)
-                    job_row = db.query(Job).filter(Job.id == job_id).first()
-                    if job_row and not job_row.r2_source_key:
-                        job_row.r2_source_key = key
-                        db.commit()
+                    
+                    def _update_db_key(uploaded_key):
+                        from database import SessionLocal
+                        bg_db = SessionLocal()
+                        try:
+                            j = bg_db.query(Job).filter(Job.id == job_id).first()
+                            if j and not j.r2_source_key:
+                                j.r2_source_key = uploaded_key
+                                bg_db.commit()
+                        except Exception as e:
+                            logger.error("Failed to update job r2_source_key in background: %s", e)
+                        finally:
+                            bg_db.close()
+
+                    r2.upload_in_background(meta["video_path"], key, on_success=_update_db_key)
         else:
             from services.downloader import (
                 _extract_audio, _get_duration, _needs_wav_extraction, get_job_dir,
@@ -547,7 +557,7 @@ def run_full_pipeline(self, job_id: str, options: dict):
             pass
 
 
-@celery.task(bind=True, name="tasks.pipeline.run_more_clips")
+@celery.task(bind=True, name="tasks.pipeline.run_more_clips", ignore_result=True)
 def run_more_clips(self, job_id: str, options: dict, excluded_clips: list):
     db = SessionLocal()
     try:

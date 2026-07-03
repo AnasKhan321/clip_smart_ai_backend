@@ -306,12 +306,14 @@ def upload_in_background(
     key: str,
     content_type: str = "video/mp4",
     on_failure: "Callable[[str], None] | None" = None,
+    on_success: "Callable[[str], None] | None" = None,
 ) -> threading.Thread:
     """Upload file to R2 in a daemon thread with retry + optional cleanup.
 
     Args:
         on_failure: called with *key* after all retries are exhausted.
                     Use it to clear the stale ``r2_clip_key`` from the DB.
+        on_success: called with *key* after upload succeeds.
     """
     def _run():
         last_exc: Exception | None = None
@@ -320,6 +322,13 @@ def upload_in_background(
                 upload_file(local_path, key, content_type)
                 _bg_logger.info("[r2] background upload OK %s (attempt %d)",
                                 key, attempt)
+                if on_success:
+                    try:
+                        on_success(key)
+                    except Exception as cb_exc:
+                        _bg_logger.error(
+                            "[r2] on_success callback error for %s: %s", key, cb_exc,
+                        )
                 return  # success
             except Exception as exc:
                 last_exc = exc

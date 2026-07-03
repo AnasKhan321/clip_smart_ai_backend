@@ -41,6 +41,18 @@ celery.conf.update(
     # Give long pipelines enough graceful-shutdown time. SIGTERM → worker
     # finishes current task within this window before SIGKILL.
     worker_shutdown_timeout=120,
+    # Performance & Network optimizations to prevent Upstash Redis rate-limiting
+    worker_send_task_events=False,
+    worker_enable_remote_control=False,
+    broker_pool_limit=10,
+    result_backend_thread_safe=True,
+    broker_transport_options={
+        "max_connections": 10,
+        "socket_keepalive": True,
+    },
+    result_backend_transport_options={
+        "max_connections": 10,
+    },
     beat_schedule={
         "cleanup-expired-clips": {
             "task": "cleanup_expired_free_clips",

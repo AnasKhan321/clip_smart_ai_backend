@@ -21,7 +21,7 @@ def _remove_local_file(path: str | None) -> None:
         print(f"Error removing local file {path}: {e}")
 
 
-@shared_task(bind=True, name="cleanup_expired_free_clips")
+@shared_task(bind=True, name="cleanup_expired_free_clips", ignore_result=True)
 def cleanup_expired_free_clips(self):
     """Delete free clips older than 3 days from R2 + local disk, mark expired.
 
@@ -105,7 +105,7 @@ def cleanup_expired_free_clips(self):
         db.close()
 
 
-@shared_task(bind=True, name="send_reengagement_emails")
+@shared_task(bind=True, name="send_reengagement_emails", ignore_result=True)
 def send_reengagement_emails(self):
     """Email users who signed up 24-48 h ago and have never submitted a job."""
     db = SessionLocal()
