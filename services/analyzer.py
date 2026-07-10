@@ -48,6 +48,64 @@ def analyze_transcript(job_id: str, options: dict, progress_callback=None) -> li
     return clips
 
 
+_TS_RANGE_RE = re.compile(
+    r'(\d{1,2}(?::\d{2}){1,2})\s*(?:-|–|to|through)\s*(\d{1,2}(?::\d{2}){1,2})',
+    re.IGNORECASE,
+)
+
+
+def _ts_to_seconds(ts: str) -> float:
+    parts = [int(p) for p in ts.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    h, m, s = parts[-3:]
+    return h * 3600 + m * 60 + s
+
+
+def parse_timestamp_ranges(text: str) -> list:
+    """Pull start-end timestamp pairs out of freeform text, e.g. '1:20-2:45' or
+    '01:10:00 to 01:12:30'. Used for user-supplied 'already clipped' ranges
+    (typed into the prompt box) and for the 'skip these ranges' advanced
+    setting — same format, two different uses.
+    """
+    if not text:
+        return []
+    ranges = []
+    for m in _TS_RANGE_RE.finditer(text):
+        start, end = _ts_to_seconds(m.group(1)), _ts_to_seconds(m.group(2))
+        if end > start:
+            ranges.append({"start_seconds": start, "end_seconds": end})
+    return ranges
+
+
+def _manual_clip_from_range(r: dict, enriched: list) -> dict:
+    start, end = r["start_seconds"], r["end_seconds"]
+    text = " ".join(seg["text"] for seg in enriched if seg["end"] > start and seg["start"] < end)
+    return {
+        "start_seconds": start,
+        "end_seconds": end,
+        "clip_type": "manual",
+        "score": 1.0,
+        "reason": "User-provided timestamp",
+        "transcript_excerpt": text[:400],
+        "hook_line": None,
+        "tags": [],
+    }
+
+
+def _drop_overlapping(candidates: list, skip_ranges: list) -> list:
+    if not skip_ranges:
+        return candidates
+    out = []
+    for c in candidates:
+        start, end = c.get("start_seconds", 0), c.get("end_seconds", 0)
+        if any(max(0, min(end, s["end_seconds"]) - max(start, s["start_seconds"])) > 0
+               for s in skip_ranges):
+            continue
+        out.append(c)
+    return out
+
+
 def find_more_clips(job_id: str, excluded_clips: list, options: dict, progress_callback=None) -> list:
     """Run a fresh analysis pass excluding already-selected clip ranges."""
     transcript = load_transcript(job_id)
@@ -67,26 +125,46 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
     chunks = _chunk_enriched(enriched, CHUNK_WINDOW_SECONDS)
     max_clips = options.get("max_clips", 5)
 
+    # "Already clipped" timestamps typed into the prompt box — use as-is,
+    # skip AI detection for them entirely.
+    keep_ranges = parse_timestamp_ranges(options.get("custom_prompt") or "")
+    keep_clips = [_manual_clip_from_range(r, enriched) for r in keep_ranges]
+
+    # Advanced-setting ranges to leave untouched — drop any AI candidate
+    # that overlaps them.
+    skip_ranges = parse_timestamp_ranges(options.get("skip_timestamps") or "")
+
+    pre = list(pre_selected or []) + keep_clips
+    remaining = max(0, max_clips - len(keep_clips))
+
     if progress_callback:
         progress_callback(10)
 
-    all_candidates = _analyze_chunks_parallel(transcript, chunks, options,
-                                              progress_callback, base_progress=10,
-                                              span=70)
-    all_candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
-    clips = _deduplicate(all_candidates, max_clips, pre_selected=pre_selected or [])
+    ai_clips: list = []
+    if remaining > 0:
+        ai_options = {**options, "max_clips": remaining}
+        all_candidates = _analyze_chunks_parallel(transcript, chunks, ai_options,
+                                                  progress_callback, base_progress=10,
+                                                  span=70)
+        all_candidates = _drop_overlapping(all_candidates, skip_ranges)
+        all_candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
+        ai_clips = _deduplicate(all_candidates, remaining, pre_selected=pre)
 
-    if not clips:
-        options_relaxed = {**options, "_relaxed": True}
-        all_relaxed = _analyze_chunks_parallel(
-            transcript, chunks, options_relaxed,
-            progress_callback, base_progress=80, span=15,
-        )
-        all_relaxed.sort(key=lambda c: c.get("score", 0), reverse=True)
-        clips = _deduplicate(all_relaxed, max_clips, pre_selected=pre_selected or [])
-        for c in clips:
-            c["_below_threshold"] = True
+        if not ai_clips:
+            options_relaxed = {**ai_options, "_relaxed": True}
+            all_relaxed = _analyze_chunks_parallel(
+                transcript, chunks, options_relaxed,
+                progress_callback, base_progress=80, span=15,
+            )
+            all_relaxed = _drop_overlapping(all_relaxed, skip_ranges)
+            all_relaxed.sort(key=lambda c: c.get("score", 0), reverse=True)
+            ai_clips = _deduplicate(all_relaxed, remaining, pre_selected=pre)
+            for c in ai_clips:
+                c["_below_threshold"] = True
+    elif progress_callback:
+        progress_callback(90)
 
+    clips = keep_clips + ai_clips
     for i, c in enumerate(clips):
         c["rank"] = i + 1
 

@@ -300,18 +300,21 @@ def _insert_candidate_clips(db, job_id: str, candidates: list,
         duration = end - start
         if duration < 1:
             continue
-        if duration < min_clip_duration:
-            logger.warning(
-                "dropping too-short clip candidate %.1f-%.1fs (%.1fs < %.1fs)",
-                start, end, duration, min_clip_duration,
-            )
-            continue
-        if duration > max_clip_duration:
-            logger.warning(
-                "dropping too-long clip candidate %.1f-%.1fs (%.1fs > %.1fs)",
-                start, end, duration, max_clip_duration,
-            )
-            continue
+        # User-provided ("already clipped") timestamps keep whatever length
+        # the user gave — only AI candidates get held to min/max duration.
+        if candidate.get("clip_type") != "manual":
+            if duration < min_clip_duration:
+                logger.warning(
+                    "dropping too-short clip candidate %.1f-%.1fs (%.1fs < %.1fs)",
+                    start, end, duration, min_clip_duration,
+                )
+                continue
+            if duration > max_clip_duration:
+                logger.warning(
+                    "dropping too-long clip candidate %.1f-%.1fs (%.1fs > %.1fs)",
+                    start, end, duration, max_clip_duration,
+                )
+                continue
         tags = json.dumps(candidate.get("tags", []))
         clip = Clip(
             job_id=job_id,

@@ -68,6 +68,7 @@ class JobCreate(BaseModel):
     min_clip_duration: int = 20
     max_clip_duration: int = 90
     target_aspect_ratio: str = "9:16"
+    skip_timestamps: Optional[str] = None
 
 
 class ClipUpdate(BaseModel):

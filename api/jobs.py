@@ -165,6 +165,7 @@ class JobFromR2In(BaseModel):
     max_clip_duration: int = 90
     target_aspect_ratio: str = "9:16"
     custom_prompt: Optional[str] = None
+    skip_timestamps: Optional[str] = None
 
 
 class AbortUploadIn(BaseModel):
@@ -245,6 +246,9 @@ def create_job_from_r2(
     _cp = (body.custom_prompt or "").strip()
     if _cp:
         options["custom_prompt"] = _cp
+    _skip = (body.skip_timestamps or "").strip()
+    if _skip:
+        options["skip_timestamps"] = _skip
     dispatch = run_task_in_background(run_full_pipeline, body.job_id, options)
     return {"job_id": body.job_id, "status": "pending", "dispatch": dispatch}
 
@@ -258,6 +262,7 @@ async def create_job(
     max_clip_duration: int = Form(90),
     target_aspect_ratio: str = Form("9:16"),
     custom_prompt: Optional[str] = Form(None),
+    skip_timestamps: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -319,6 +324,9 @@ async def create_job(
     _cp = (custom_prompt or "").strip()
     if _cp:
         options["custom_prompt"] = _cp
+    _skip = (skip_timestamps or "").strip()
+    if _skip:
+        options["skip_timestamps"] = _skip
 
     try:
         dispatch = run_task_in_background(run_full_pipeline, job_id, options)
@@ -436,6 +444,9 @@ def more_clips(
     custom_prompt = (body.get("custom_prompt") or "").strip()
     if custom_prompt:
         options["custom_prompt"] = custom_prompt
+    skip_timestamps = (body.get("skip_timestamps") or "").strip()
+    if skip_timestamps:
+        options["skip_timestamps"] = skip_timestamps
 
     job.status = "analyzing"
     job.stage_progress = 0
@@ -594,6 +605,8 @@ def regenerate_job(
         "target_aspect_ratio": body.target_aspect_ratio,
         "_skip_to_analyze": True,
     }
+    if (body.skip_timestamps or "").strip():
+        options["skip_timestamps"] = body.skip_timestamps.strip()
 
     run_task_in_background(run_full_pipeline, job_id, options)
     return {"job_id": job_id, "status": "analyzing"}
