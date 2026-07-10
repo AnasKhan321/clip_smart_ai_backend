@@ -122,7 +122,6 @@ def find_more_clips(job_id: str, excluded_clips: list, options: dict, progress_c
 
 def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
                   progress_callback=None, pre_selected: list = None) -> list:
-    chunks = _chunk_enriched(enriched, CHUNK_WINDOW_SECONDS)
     max_clips = options.get("max_clips", 5)
 
     # "Already clipped" timestamps typed into the prompt box — use as-is,
@@ -130,9 +129,20 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
     keep_ranges = parse_timestamp_ranges(options.get("custom_prompt") or "")
     keep_clips = [_manual_clip_from_range(r, enriched) for r in keep_ranges]
 
-    # Advanced-setting ranges to leave untouched — drop any AI candidate
-    # that overlaps them.
+    # Advanced-setting ranges to leave untouched — strip them out of the
+    # transcript before the LLM ever sees it, so it picks the rest of its
+    # clips from the remaining good content instead of wasting picks on
+    # segments we then throw away.
     skip_ranges = parse_timestamp_ranges(options.get("skip_timestamps") or "")
+    analysis_enriched = enriched
+    if skip_ranges:
+        analysis_enriched = [
+            seg for seg in enriched
+            if not any(seg["start"] < s["end_seconds"] and seg["end"] > s["start_seconds"]
+                       for s in skip_ranges)
+        ]
+
+    chunks = _chunk_enriched(analysis_enriched, CHUNK_WINDOW_SECONDS)
 
     pre = list(pre_selected or []) + keep_clips
     remaining = max(0, max_clips - len(keep_clips))
@@ -146,6 +156,9 @@ def _run_analysis(_job_id: str, transcript: dict, enriched: list, options: dict,
         all_candidates = _analyze_chunks_parallel(transcript, chunks, ai_options,
                                                   progress_callback, base_progress=10,
                                                   span=70)
+        # Belt-and-suspenders: the LLM only saw the trimmed transcript, but a
+        # clip spanning the gap around a removed segment could still land on
+        # a skip range — drop those too.
         all_candidates = _drop_overlapping(all_candidates, skip_ranges)
         all_candidates.sort(key=lambda c: c.get("score", 0), reverse=True)
         ai_clips = _deduplicate(all_candidates, remaining, pre_selected=pre)
