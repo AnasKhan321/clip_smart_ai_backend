@@ -354,20 +354,27 @@ def run_full_pipeline(self, job_id: str, options: dict):
 
         if job.source_type == "url":
             # Best-effort: grab the source's thumbnail URL before the real
-            # download starts, so the UI has something to show immediately
+            # download finishes, so the UI has something to show immediately
             # instead of waiting for the full video + ffmpeg frame grab.
-            # Only attempt this when downloads go straight from this backend
-            # host (webshare path) — when DOWNLOAD_SERVICE_URL is set, real
-            # downloads are proxied through a separate mac-service IP because
-            # this host's IP is YouTube-bot-blocked, so a direct yt-dlp call
-            # from here would just fail every time.
+            def thumb_callback(url: str):
+                j = db.query(Job).filter(Job.id == job_id).first()
+                if j and not j.thumbnail_url:
+                    j.thumbnail_url = url
+                    db.commit()
+
+            # When downloads go straight from this backend host (webshare
+            # path, no DOWNLOAD_SERVICE_URL), fetch metadata directly — that
+            # host's proxy/cookie setup is the same one used for the real
+            # download. When DOWNLOAD_SERVICE_URL is set, mac-service does
+            # its own metadata fetch and surfaces it via /status polling
+            # (see thumb_callback passed into download_video below) — a
+            # direct call from here would just hit YouTube's bot-block.
             if not os.getenv("DOWNLOAD_SERVICE_URL", "").strip():
                 try:
                     from services.downloader import fetch_thumbnail_url
                     early_thumb = fetch_thumbnail_url(job.source_url)
                     if early_thumb:
-                        job.thumbnail_url = early_thumb
-                        db.commit()
+                        thumb_callback(early_thumb)
                 except Exception as exc:
                     logger.warning("early thumbnail fetch failed for %s: %s", job_id, exc)
 
@@ -407,7 +414,8 @@ def run_full_pipeline(self, job_id: str, options: dict):
                 meta = download_video(job.source_url, job_id,
                                       progress_callback=dl_progress,
                                       quality=quality,
-                                      cache_r2_key=cache_r2_key)
+                                      cache_r2_key=cache_r2_key,
+                                      thumbnail_callback=thumb_callback)
 
                 # Persist in cache table so next user benefits
                 if _vid_id and cache_r2_key and meta.get("video_path"):

@@ -16,13 +16,15 @@ def get_job_dir(job_id: str) -> Path:
 
 
 def download_video(url: str, job_id: str, progress_callback=None,
-                   quality: str = "720p", cache_r2_key: str = "") -> dict:
+                   quality: str = "720p", cache_r2_key: str = "",
+                   thumbnail_callback=None) -> dict:
     job_dir = get_job_dir(job_id)
 
     svc_url = os.getenv("DOWNLOAD_SERVICE_URL", "").strip()
     if svc_url:
         meta = _download_via_mac_service(url, job_id, job_dir, svc_url, progress_callback,
-                                         quality=quality, cache_r2_key=cache_r2_key)
+                                         quality=quality, cache_r2_key=cache_r2_key,
+                                         thumbnail_callback=thumbnail_callback)
     else:
         meta = _download_via_webshare(url, job_dir, progress_callback)
 
@@ -159,7 +161,7 @@ def _write_cookies_tempfile() -> Optional[str]:
 
 def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_url: str,
                               progress_callback=None, quality: str = "720p",
-                              cache_r2_key: str = "") -> dict:
+                              cache_r2_key: str = "", thumbnail_callback=None) -> dict:
     import httpx, time
     from services import r2
 
@@ -180,6 +182,7 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
     print(f"[downloader] mac-service task_id={task_id}", flush=True)
 
     # Poll for completion (max 15 min)
+    thumb_fired = False
     for i in range(180):
         time.sleep(5)
         try:
@@ -194,6 +197,12 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
             print(f"[downloader] mac-service polling... {i*5}s status={st}", flush=True)
         if progress_callback and st == "downloading":
             progress_callback(min(10 + i, 75))
+        if not thumb_fired and thumbnail_callback and data.get("thumbnail"):
+            thumb_fired = True
+            try:
+                thumbnail_callback(data["thumbnail"])
+            except Exception as e:
+                print(f"[downloader] thumbnail callback failed (non-fatal): {e}", flush=True)
         if st == "done":
             break
         if st == "error":
