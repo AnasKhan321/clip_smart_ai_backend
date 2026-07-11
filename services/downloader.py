@@ -255,6 +255,37 @@ def _download_direct_url(url: str, local_path: Path) -> None:
         raise
 
 
+def fetch_thumbnail_url(source_url: str) -> Optional[str]:
+    """Best-effort, metadata-only yt-dlp lookup for the source's thumbnail
+    image URL — no video bytes downloaded. Lets the UI show a thumbnail
+    while the real download is still in progress. Returns None on any
+    failure; callers should treat this as optional."""
+    import yt_dlp as ytdlp_lib
+
+    cookie_file = _write_cookies_tempfile()
+    ydl_opts = {
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "extractor_args": {"youtube": {"player_client": ["android", "ios", "web"]}},
+    }
+    if cookie_file:
+        ydl_opts["cookiefile"] = cookie_file
+    else:
+        try:
+            ydl_opts["proxy"] = _pick_proxy()
+        except Exception:
+            pass
+
+    try:
+        with ytdlp_lib.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(source_url, download=False)
+        return info.get("thumbnail")
+    except Exception as e:
+        print(f"[downloader] early thumbnail fetch failed (non-fatal): {e}", flush=True)
+        return None
+
+
 def _download_via_webshare(source_url: str, job_dir: Path, progress_callback=None) -> dict:
     import yt_dlp as ytdlp_lib
 

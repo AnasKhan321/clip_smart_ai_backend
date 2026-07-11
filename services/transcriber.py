@@ -1070,7 +1070,10 @@ _transcript_cache_lock = threading.Lock()
 def load_transcript(job_id: str) -> dict:
     with _transcript_cache_lock:
         cached = _transcript_cache.get(job_id)
-    if cached is not None:
+    # Only trust the cache once romanization has actually succeeded — a
+    # transient LLM failure (e.g. Gemini 429) must not get stuck forever as
+    # cached raw Devanagari for the life of this worker process.
+    if cached is not None and cached.get("_hinglish_applied"):
         return cached
     storage = os.getenv("STORAGE_PATH", "./storage")
     path = Path(storage) / "jobs" / job_id / "transcript.json"

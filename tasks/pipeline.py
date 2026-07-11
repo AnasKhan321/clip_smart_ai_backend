@@ -353,6 +353,18 @@ def run_full_pipeline(self, job_id: str, options: dict):
             _set_job_status(db, job_id, "downloading", p)
 
         if job.source_type == "url":
+            # Best-effort: grab the source's thumbnail URL before the real
+            # download starts, so the UI has something to show immediately
+            # instead of waiting for the full video + ffmpeg frame grab.
+            try:
+                from services.downloader import fetch_thumbnail_url
+                early_thumb = fetch_thumbnail_url(job.source_url)
+                if early_thumb:
+                    job.thumbnail_url = early_thumb
+                    db.commit()
+            except Exception as exc:
+                logger.warning("early thumbnail fetch failed for %s: %s", job_id, exc)
+
             # Determine quality from subscription tier
             user = db.query(User).filter(User.id == job.user_id).first()
             quality = required_quality(user) if user else "720p"
@@ -457,17 +469,17 @@ def run_full_pipeline(self, job_id: str, options: dict):
         except Exception as exc:
             logger.warning("source dim probe failed for %s: %s", job_id, exc)
 
-        thumb_path = Path(storage) / "jobs" / job_id / "thumbnail.jpg"
-        try:
-            if extract_thumbnail(source_path, str(thumb_path)):
-                thumbnail_url = f"/storage/jobs/{job_id}/thumbnail.jpg"
-            else:
-                thumbnail_url = None
-        except Exception as exc:
-            logger.warning("thumbnail extraction failed for %s: %s", job_id, exc)
-            thumbnail_url = None
-
         job = db.query(Job).filter(Job.id == job_id).first()
+        thumbnail_url = None
+        if not job.thumbnail_url:
+            # Fallback for upload-type jobs and any failed early fetch above.
+            thumb_path = Path(storage) / "jobs" / job_id / "thumbnail.jpg"
+            try:
+                if extract_thumbnail(source_path, str(thumb_path)):
+                    thumbnail_url = f"/storage/jobs/{job_id}/thumbnail.jpg"
+            except Exception as exc:
+                logger.warning("thumbnail extraction failed for %s: %s", job_id, exc)
+
         job.video_title = meta.get("title")
         if meta.get("duration"):
             job.video_duration_seconds = float(meta["duration"])
