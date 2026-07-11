@@ -172,6 +172,12 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     music_fade_out = float(options.get("music_fade_out", 0))
     music_trim_start = float(options.get("music_trim_start", 0))
     music_trim_end = float(options.get("music_trim_end", 0))
+    scene_template_id = options.get("scene_template_id")
+    # Scene templates place the clip inside a 16:9 TV/tablet screen cutout —
+    # feeding them an already-vertical 9:16 reframe would crop it a second
+    # time. Force 16:9 so the template gets the clip's natural aspect.
+    if scene_template_id:
+        aspect_ratio = "16:9"
     # Focus modes (face/speaker) only make sense when re-framing to vertical.
     # For 16:9 / 1:1 they'd run heavy track computation (face detection on
     # the entire source) for no benefit — the filter chain ignores them.
@@ -315,6 +321,18 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
                         music_trim_start, music_trim_end)
         except Exception as exc:
             logger.warning("audio mixing failed (continuing without music): %s", exc)
+
+    if scene_template_id:
+        from services.scene_template import apply_scene_template
+        templated_path = str(clips_dir / f"clip_{rank:03d}_templated.mp4")
+        try:
+            apply_scene_template(final_video_path, scene_template_id, templated_path)
+            final_video_path = templated_path
+            logger.info("scene template applied: clip=%s template=%s",
+                        clip.get("rank"), scene_template_id)
+        except Exception as exc:
+            logger.exception("scene template failed for clip %s", clip.get("rank"))
+            raise RuntimeError(f"scene template failed: {exc}") from exc
 
     shutil.copy(final_video_path, export_path)
 

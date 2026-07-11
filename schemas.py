@@ -98,6 +98,7 @@ class ExportRequest(BaseModel):
     music_fade_out: float = 0  # seconds
     music_trim_start: float = 0  # seconds
     music_trim_end: float = 0  # seconds (0 = use full duration)
+    scene_template_id: Optional[str] = None  # places clip inside a TV/tablet screen cutout
 
     @field_validator('music_track_id')
     @classmethod

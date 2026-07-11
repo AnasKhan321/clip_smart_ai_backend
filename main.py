@@ -14,6 +14,7 @@ from api.debug import router as debug_router
 from api.payments import router as payments_router
 from api.subscriptions import router as subscriptions_router
 from api.system import router as system_router
+from api.hook_templates import router as hook_templates_router, TEMPLATES_DIR as HOOK_TEMPLATES_DIR
 
 load_dotenv()
 
@@ -164,6 +165,9 @@ os.makedirs(storage_path, exist_ok=True)
 
 app.mount("/storage", StaticFiles(directory=storage_path), name="storage")
 
+HOOK_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/hook-templates-static", StaticFiles(directory=str(HOOK_TEMPLATES_DIR)), name="hook-templates-static")
+
 @app.get("/")
 def root():
     return {"status": "ok", "service": "clipforge-api"}
@@ -183,3 +187,4 @@ app.include_router(music_router, prefix="/api")
 app.include_router(payments_router, prefix="/api")
 app.include_router(subscriptions_router, prefix="/api")
 app.include_router(debug_router, prefix="/api")
+app.include_router(hook_templates_router, prefix="/api")
