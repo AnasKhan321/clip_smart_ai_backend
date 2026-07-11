@@ -115,6 +115,7 @@ class Job(Base):
     video_title = Column(String, nullable=True)
     source_width = Column(Integer, nullable=True)
     source_height = Column(Integer, nullable=True)
+    thumbnail_url = Column(String, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime, nullable=True)

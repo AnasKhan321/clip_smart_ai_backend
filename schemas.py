@@ -55,6 +55,7 @@ class JobOut(BaseModel):
     detected_topic: Optional[str] = None
     video_duration_seconds: Optional[float] = None
     video_title: Optional[str] = None
+    thumbnail_url: Optional[str] = None
     error_message: Optional[str] = None
     clips: List[ClipOut] = []
     created_at: datetime

@@ -748,7 +748,11 @@ def add_hook_to_video(
             "-c:v", "libx264", "-preset", "fast", "-crf", "22",
             output_path,
         ]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, timeout=600)
+        except subprocess.CalledProcessError as exc:
+            stderr = (exc.stderr or b"").decode("utf-8", errors="ignore")[-2000:]
+            raise RuntimeError(f"ffmpeg overlay failed (exit {exc.returncode}): {stderr}") from exc
         return output_path
     finally:
         if os.path.exists(hook_png):

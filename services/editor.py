@@ -48,6 +48,16 @@ def probe_source_dims(source_path: str) -> tuple[int, int]:
     return int(w), int(h)
 
 
+def extract_thumbnail(source_path: str, out_path: str, at_seconds: float = 1.0) -> bool:
+    """Grab a single frame as a JPEG thumbnail. Returns False on failure."""
+    result = subprocess.run(
+        [ffmpeg_path(), "-y", "-ss", str(at_seconds), "-i", source_path,
+         "-frames:v", "1", "-vf", "scale=480:-2", "-q:v", "4", out_path],
+        capture_output=True, text=True, timeout=30,
+    )
+    return result.returncode == 0 and Path(out_path).exists()
+
+
 # ── Filter chain builder ────────────────────────────────────────────────────
 
 def _build_video_filter(

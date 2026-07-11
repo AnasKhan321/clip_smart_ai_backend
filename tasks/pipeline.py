@@ -12,7 +12,7 @@ from services.downloader import download_video
 from services.transcriber import transcribe, load_transcript
 from services.diarizer import diarize
 from services.analyzer import analyze_transcript, find_more_clips
-from services.editor import render_and_caption_clip, probe_source_dims
+from services.editor import render_and_caption_clip, probe_source_dims, extract_thumbnail
 from services.credits import refund
 from services import r2
 from services.video_cache import required_quality, get_cache_hit, touch_cache, store_cache
@@ -457,6 +457,16 @@ def run_full_pipeline(self, job_id: str, options: dict):
         except Exception as exc:
             logger.warning("source dim probe failed for %s: %s", job_id, exc)
 
+        thumb_path = Path(storage) / "jobs" / job_id / "thumbnail.jpg"
+        try:
+            if extract_thumbnail(source_path, str(thumb_path)):
+                thumbnail_url = f"/storage/jobs/{job_id}/thumbnail.jpg"
+            else:
+                thumbnail_url = None
+        except Exception as exc:
+            logger.warning("thumbnail extraction failed for %s: %s", job_id, exc)
+            thumbnail_url = None
+
         job = db.query(Job).filter(Job.id == job_id).first()
         job.video_title = meta.get("title")
         if meta.get("duration"):
@@ -464,14 +474,20 @@ def run_full_pipeline(self, job_id: str, options: dict):
         if src_w and src_h:
             job.source_width = src_w
             job.source_height = src_h
+        if thumbnail_url:
+            job.thumbnail_url = thumbnail_url
         db.commit()
 
         # Stage 2: Transcribe
         _set_job_status(db, job_id, "transcribing", 0)
-        transcript = transcribe(
+        transcribe(
             job_id,
             progress_callback=lambda p: _set_job_status(db, job_id, "transcribing", p),
         )
+        # Reload from disk — transcribe() may return the raw (pre-romanization)
+        # result on a fresh transcription; load_transcript() applies Hinglish
+        # romanization and is the copy that must flow into caption rendering.
+        transcript = load_transcript(job_id)
         job = db.query(Job).filter(Job.id == job_id).first()
         job.detected_language = transcript.get("language")
         db.commit()

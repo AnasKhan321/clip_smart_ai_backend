@@ -55,6 +55,7 @@ _PENDING_COLUMNS = [
     ("users", "subscription_tier_id", "INTEGER"),
     ("users", "referral_code", "VARCHAR"),
     ("users", "referred_by_user_id", "VARCHAR"),
+    ("jobs", "thumbnail_url", "VARCHAR"),
 ]
 
 

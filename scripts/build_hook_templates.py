@@ -77,6 +77,12 @@ def build_one(src: Path, force: bool = False) -> None:
         return
 
     img = Image.open(src).convert("RGBA")
+    # libx264 requires even width/height. Real photos are whatever size the
+    # camera gave them — crop 1px off if needed so every downstream ffmpeg
+    # pass (scene compositing, hook overlay) always gets an even canvas.
+    even_w, even_h = img.width - (img.width % 2), img.height - (img.height % 2)
+    if (even_w, even_h) != (img.width, img.height):
+        img = img.crop((0, 0, even_w, even_h))
     arr = np.array(img)
     mask = green_mask(arr)
     corners, off_axis_deg = find_screen_quad(mask)
