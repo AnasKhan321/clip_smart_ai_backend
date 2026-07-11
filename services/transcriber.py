@@ -1078,6 +1078,16 @@ def load_transcript(job_id: str) -> dict:
         _ensure_local_artifact(job_id, "transcript.json")
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    # Captions should read as Hinglish (Roman script), not literal Devanagari.
+    # Runs once per transcript (flagged via _hinglish_applied) — covers both
+    # fresh transcriptions and jobs transcribed before this existed.
+    from services.hinglish import ensure_hinglish
+    if ensure_hinglish(data):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        _mirror_artifact_to_r2(job_id, "transcript.json")
+
     with _transcript_cache_lock:
         if len(_transcript_cache) >= _TRANSCRIPT_CACHE_MAX:
             # Drop oldest insertion (CPython dicts preserve order)
