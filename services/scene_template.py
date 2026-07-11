@@ -7,6 +7,8 @@ corner quad (screen_quad), plus a `rotated` flag for tilted screens (e.g. a
 tablet held at an angle) that need a perspective warp, not a straight overlay.
 """
 import json
+import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Tuple
@@ -14,10 +16,24 @@ from typing import Tuple
 from services.media_tools import ffmpeg_path, ffprobe_path
 
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates" / "hooks"
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _template_dir(template_id: str) -> Path:
+    """template_id comes straight from the export request body — validate
+    against an allowlist pattern and confirm the resolved path stays inside
+    TEMPLATES_DIR before it touches the filesystem, closing path traversal."""
+    if not _ID_RE.fullmatch(template_id or ""):
+        raise ValueError(f"invalid scene template id: {template_id!r}")
+    resolved_root = TEMPLATES_DIR.resolve()
+    d = (TEMPLATES_DIR / template_id).resolve()
+    if not str(d).startswith(str(resolved_root) + os.sep):
+        raise ValueError(f"invalid scene template id: {template_id!r}")
+    return d
 
 
 def get_template_meta(template_id: str) -> dict:
-    meta_path = TEMPLATES_DIR / template_id / "meta.json"
+    meta_path = _template_dir(template_id) / "meta.json"
     if not meta_path.exists():
         raise FileNotFoundError(f"unknown scene template: {template_id}")
     return json.loads(meta_path.read_text())
@@ -36,7 +52,7 @@ def _probe_dims(video_path: str) -> Tuple[int, int]:
 def apply_scene_template(video_path: str, template_id: str, output_path: str) -> str:
     meta = get_template_meta(template_id)
     canvas_w, canvas_h = meta["canvas"]
-    overlay_png = str(TEMPLATES_DIR / template_id / "overlay.png")
+    overlay_png = str(_template_dir(template_id) / "overlay.png")
 
     rx, ry, rw, rh = meta["video_rect"]
     bbox_x, bbox_y = round(rx * canvas_w), round(ry * canvas_h)
