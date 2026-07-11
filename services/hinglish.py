@@ -17,6 +17,11 @@ logger = logging.getLogger(__name__)
 
 DEVANAGARI_RUN = re.compile(r"[ऀ-ॿ]+")
 DEFAULT_MODEL = "google/gemini-2.5-flash-lite"
+# Keep each LLM call's word list small enough that the JSON mapping response
+# can't blow past the token budget — a long video can have hundreds of
+# unique words, and one giant call for all of them hit MAX_TOKENS with zero
+# output (finishReason=MAX_TOKENS, empty parts) on a ~250-word transcript.
+_BATCH_SIZE = 120
 
 
 def _has_devanagari(text: str) -> bool:
@@ -52,7 +57,7 @@ def _build_mapping(words: list[str]) -> dict[str, str]:
         purpose="json",
         openrouter_model=model,
         gemini_model=model,
-        max_tokens=4096,
+        max_tokens=8192,
         json_response=True,
     ).strip()
     if raw.startswith("```"):
@@ -84,11 +89,28 @@ def ensure_hinglish(transcript: dict) -> bool:
     if not words:
         transcript["_hinglish_applied"] = True
         return False
-    try:
-        mapping = _build_mapping(words)
-    except Exception:
-        logger.exception("hinglish transliteration LLM call failed — leaving Devanagari as-is")
+
+    mapping: dict[str, str] = {}
+    all_batches_ok = True
+    for i in range(0, len(words), _BATCH_SIZE):
+        batch = words[i:i + _BATCH_SIZE]
+        try:
+            mapping.update(_build_mapping(batch))
+        except Exception:
+            logger.exception(
+                "hinglish transliteration LLM call failed for words %d-%d — "
+                "leaving those as Devanagari (will retry next load)",
+                i, i + len(batch),
+            )
+            all_batches_ok = False
+
+    if not mapping:
         return False
     _apply_mapping(transcript, mapping)
-    transcript["_hinglish_applied"] = True
+    # Only mark fully done if every batch succeeded — a partial failure
+    # leaves the flag unset so the next load_transcript() retries just the
+    # words that are still Devanagari (already-converted ones no longer
+    # match DEVANAGARI_RUN, so they're skipped for free).
+    if all_batches_ok:
+        transcript["_hinglish_applied"] = True
     return True
