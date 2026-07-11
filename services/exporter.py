@@ -223,10 +223,17 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
     # invocation as cut + aspect + captions — eliminates a second full
     # re-encode and roughly halves wall-clock for hooked exports on
     # Railway shared vCPU.
+    # Scene templates reserve a clean margin around the video slot for the
+    # hook (that's the whole point of the template art) — baking the hook
+    # onto the pre-warp 16:9 clip means the cover-fit-crop into the template's
+    # (usually narrower) screen slot chops its left/right edges. Render the
+    # hook onto the final templated canvas instead, in its clean zone.
+    hook_after_template = bool(scene_template_id and hook_text)
+
     hook_png_path: Optional[str] = None
     hook_overlay_x = 0
     hook_overlay_y = 0
-    if hook_text:
+    if hook_text and not hook_after_template:
         from services.hook_overlay import create_hook_image
         # Output canvas size depends on aspect_ratio. render_and_caption_clip
         # always produces 1080-wide for 9:16/1:1/square_in_vertical; for 16:9
@@ -333,6 +340,22 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
         except Exception as exc:
             logger.exception("scene template failed for clip %s", clip.get("rank"))
             raise RuntimeError(f"scene template failed: {exc}") from exc
+
+    if hook_after_template:
+        from services.hook_overlay import add_hook_to_video
+        hooked_path = str(clips_dir / f"clip_{rank:03d}_hooked.mp4")
+        try:
+            add_hook_to_video(
+                final_video_path, hook_text, hooked_path,
+                position=hook_position, font_scale=hook_font_scale,
+                style=hook_style, y_pct=hook_y_pct,
+            )
+            final_video_path = hooked_path
+            logger.info("hook applied post-template: clip=%s style=%s",
+                        clip.get("rank"), hook_style)
+        except Exception as exc:
+            logger.exception("post-template hook overlay failed for clip %s", clip.get("rank"))
+            raise RuntimeError(f"hook overlay failed: {exc}") from exc
 
     shutil.copy(final_video_path, export_path)
 
