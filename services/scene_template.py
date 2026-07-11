@@ -57,6 +57,17 @@ def apply_scene_template(video_path: str, template_id: str, output_path: str) ->
     rx, ry, rw, rh = meta["video_rect"]
     bbox_x, bbox_y = round(rx * canvas_w), round(ry * canvas_h)
     bbox_w, bbox_h = round(rw * canvas_w), round(rh * canvas_h)
+
+    # overlay.png's hole is dilated by edge_feather_px past the exact screen
+    # quad (kills anti-aliased green fringe on the template asset) — grow the
+    # video rect by the same margin so it fully fills the larger hole instead
+    # of leaving a thin gap of the black pad showing at the edge.
+    feather = int(meta.get("edge_feather_px", 0))
+    bbox_x -= feather
+    bbox_y -= feather
+    bbox_w += 2 * feather
+    bbox_h += 2 * feather
+
     # even dims — libx264 requires it, and cover-fit crop can land on an odd pixel
     bbox_w -= bbox_w % 2
     bbox_h -= bbox_h % 2

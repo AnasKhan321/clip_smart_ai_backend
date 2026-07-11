@@ -40,7 +40,21 @@ async def lifespan(app: FastAPI):
     _purge_video_cache()
     # Seed subscription tiers
     _seed_subscription_tiers()
+    # Build any new scene templates dropped in templates/hooks/_raw/ since
+    # last deploy — every push restarts the server, so this is the natural
+    # place to pick them up without a separate watcher process.
+    _build_hook_templates()
     yield
+
+
+def _build_hook_templates() -> None:
+    import logging
+    logger = logging.getLogger(__name__)
+    try:
+        from scripts.build_hook_templates import build_all
+        build_all()
+    except Exception:
+        logger.exception("hook template build failed (continuing startup)")
 
 
 def _reset_stale_exports() -> None:

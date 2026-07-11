@@ -21,6 +21,7 @@ OUT_DIR = Path(__file__).parent.parent / "templates" / "hooks"
 
 GREEN_TOL = dict(g_min=140, rb_max=110, ratio=1.4)
 ROTATED_THRESHOLD_DEG = 2.0  # angle beyond this needs perspective-warp compositing, not simple overlay
+EDGE_FEATHER_PX = 2  # dilate punch by this much to eat anti-aliased green fringe at the screen edge
 
 
 def slugify(name: str) -> str:
@@ -95,7 +96,12 @@ def build_one(src: Path, force: bool = False) -> None:
     # Punch exact mask, not the bounding box — a tilted screen's bbox also
     # covers bezel/background in its corner triangles; punching those to
     # alpha=0 too would let composited video bleed past the real screen edges.
-    arr[mask, 3] = 0
+    # Dilate a couple px first: pixels right on the green/bezel boundary are
+    # anti-aliased (partially green) and fail the strict mask threshold, so
+    # they'd stay opaque and show up as a thin green fringe line otherwise.
+    kernel = np.ones((3, 3), np.uint8)
+    punch_mask = cv2.dilate(mask.astype(np.uint8), kernel, iterations=EDGE_FEATHER_PX) > 0
+    arr[punch_mask, 3] = 0
     dest_dir.mkdir(parents=True, exist_ok=True)
     Image.fromarray(arr).save(dest_dir / "overlay.png")
 
@@ -106,14 +112,16 @@ def build_one(src: Path, force: bool = False) -> None:
         "video_rect": [x0 / img.width, y0 / img.height, w / img.width, h / img.height],
         "screen_quad": [[round(float(px) / img.width, 5), round(float(py) / img.height, 5)] for px, py in corners],
         "rotated": rotated,
+        "edge_feather_px": EDGE_FEATHER_PX,
     }
     (dest_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     print(f"built: {slug}  bbox=({x0:.0f},{y0:.0f},{w:.0f},{h:.0f})  "
           f"rotated={rotated}  canvas={img.width}x{img.height}")
 
 
-def main() -> None:
-    force = "--force" in sys.argv
+def build_all(force: bool = False) -> None:
+    """Process every raw image in _raw/ — safe to call on every server boot,
+    already-built templates are skipped unless force=True."""
     if not RAW_DIR.exists():
         print(f"no raw dir at {RAW_DIR}, nothing to do")
         return
@@ -126,6 +134,10 @@ def main() -> None:
             build_one(f, force=force)
         except ValueError as e:
             print(f"error: {f.name}: {e}", file=sys.stderr)
+
+
+def main() -> None:
+    build_all(force="--force" in sys.argv)
 
 
 if __name__ == "__main__":

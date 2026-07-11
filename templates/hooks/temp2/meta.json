@@ -29,5 +29,6 @@
       0.55443
     ]
   ],
-  "rotated": false
+  "rotated": false,
+  "edge_feather_px": 2
 }
