@@ -153,7 +153,11 @@ def _generate_gemini(
     if not candidates:
         raise RuntimeError(f"Gemini returned no candidates: {data}")
     parts = candidates[0].get("content", {}).get("parts") or []
-    return "".join(str(part.get("text", "")) for part in parts).strip()
+    text = "".join(str(part.get("text", "")) for part in parts).strip()
+    if not text:
+        finish_reason = candidates[0].get("finishReason")
+        raise RuntimeError(f"Gemini returned empty text (finishReason={finish_reason}): {data}")
+    return text
 
 
 def _generate_vertex_gemini(
@@ -214,7 +218,11 @@ def _generate_vertex_gemini(
     if not candidates:
         raise RuntimeError(f"Vertex Gemini returned no candidates: {data}")
     parts = candidates[0].get("content", {}).get("parts") or []
-    return "".join(str(part.get("text", "")) for part in parts).strip()
+    text = "".join(str(part.get("text", "")) for part in parts).strip()
+    if not text:
+        finish_reason = candidates[0].get("finishReason")
+        raise RuntimeError(f"Vertex Gemini returned empty text (finishReason={finish_reason}): {data}")
+    return text
 
 
 def _vertex_credentials():
