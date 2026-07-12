@@ -14,12 +14,18 @@ from services.media_tools import ffmpeg_path, encoder_audio_opts, build_audio_mi
 logger = logging.getLogger(__name__)
 
 
-def _ensure_local_source(job_id: str) -> Path:
+def _ensure_local_source(job_id: str, source_url: Optional[str] = None) -> Path:
     """Make sure the source video exists on local worker disk.
 
     Worker disk is ephemeral on Railway — after a redeploy or task re-delivery
     to a different worker, `storage/jobs/{id}/original.mp4` may be gone even
     though the job already finished its earlier stages. Pull it back from R2.
+
+    If R2 is also missing it (e.g. the background mirror upload never
+    finished before a redeploy killed it — see `r2.upload_in_background` in
+    pipeline.py), and the caller passes the original `source_url`, fall back
+    to re-downloading from the source and re-mirroring to R2 synchronously
+    this time, so it doesn't get lost again on the next redeploy.
     """
     storage = os.getenv("STORAGE_PATH", "./storage")
     job_dir = Path(storage) / "jobs" / job_id
@@ -29,29 +35,41 @@ def _ensure_local_source(job_id: str) -> Path:
         return local
 
     # Try R2 with each candidate extension; mp4 is the convention.
-    if not r2.is_enabled():
-        raise FileNotFoundError(
-            f"source not found locally and R2 not configured: {local}"
+    if r2.is_enabled():
+        for ext in ("mp4", "mkv", "webm", "m4a"):
+            key = f"jobs/{job_id}/original.{ext}"
+            try:
+                if r2.object_exists(key):
+                    target = job_dir / f"original.{ext}"
+                    r2.download_file(key, str(target))
+                    # Always present an `original.mp4` alias so downstream code
+                    # (editor.py etc.) finds the expected name.
+                    if ext != "mp4":
+                        mp4_alias = job_dir / "original.mp4"
+                        if not mp4_alias.exists():
+                            try:
+                                mp4_alias.symlink_to(target.name)
+                            except Exception:
+                                shutil.copy(target, mp4_alias)
+                        return mp4_alias
+                    return target
+            except Exception as exc:
+                logger.warning("r2 source restore probe failed (%s): %s", key, exc)
+
+    if source_url:
+        logger.warning(
+            "source missing locally and in R2 for job %s — re-downloading "
+            "from source_url as last resort", job_id,
         )
-    for ext in ("mp4", "mkv", "webm", "m4a"):
-        key = f"jobs/{job_id}/original.{ext}"
-        try:
-            if r2.object_exists(key):
-                target = job_dir / f"original.{ext}"
-                r2.download_file(key, str(target))
-                # Always present an `original.mp4` alias so downstream code
-                # (editor.py etc.) finds the expected name.
-                if ext != "mp4":
-                    mp4_alias = job_dir / "original.mp4"
-                    if not mp4_alias.exists():
-                        try:
-                            mp4_alias.symlink_to(target.name)
-                        except Exception:
-                            shutil.copy(target, mp4_alias)
-                    return mp4_alias
-                return target
-        except Exception as exc:
-            logger.warning("r2 source restore probe failed (%s): %s", key, exc)
+        from services.downloader import download_video
+        meta = download_video(source_url, job_id)
+        redownloaded = Path(meta["video_path"])
+        if r2.is_enabled():
+            try:
+                r2.upload_file(str(redownloaded), r2.source_key(job_id))
+            except Exception as exc:
+                logger.warning("re-mirror to R2 after redownload failed (%s): %s", job_id, exc)
+        return redownloaded
 
     raise FileNotFoundError(
         f"source not found in R2 either: jobs/{job_id}/original.*"
@@ -154,7 +172,7 @@ def _mix_audio_and_reencode(
     return output_path
 
 
-def export_clip(job_id: str, clip: dict, options: dict) -> str:
+def export_clip(job_id: str, clip: dict, options: dict, source_url: Optional[str] = None) -> str:
     aspect_ratio = options.get("aspect_ratio", "9:16")
     include_captions = options.get("include_captions", True)
     caption_style = options.get("caption_style", "word_highlight")
@@ -186,7 +204,7 @@ def export_clip(job_id: str, clip: dict, options: dict) -> str:
 
     # Restore source from R2 if worker disk was wiped — must happen before
     # face/speaker track computation (those also read the source video).
-    _ensure_local_source(job_id)
+    _ensure_local_source(job_id, source_url=source_url)
 
     # Compute focus / face track lazily on first export of each mode.
     # For face mode: process ONLY the clip window, not the whole source.

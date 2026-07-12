@@ -141,7 +141,8 @@ def _rerender_clip(clip: Clip, db: Session):
     # Pull source from R2 if worker disk was wiped — same reason as exporter.
     try:
         from services.exporter import _ensure_local_source
-        _ensure_local_source(clip.job_id)
+        source_url = job.source_url if job and job.source_type == "url" else None
+        _ensure_local_source(clip.job_id, source_url=source_url)
     except Exception as exc:
         logger.warning("source restore for rerender failed (%s): %s",
                        clip.job_id, exc)
@@ -295,7 +296,9 @@ def _spawn_export_background(clip_id: str, job_id: str,
             acquired = True
             logger.info("export queue: slot acquired for clip %s, starting render", clip_id)
             try:
-                export_path = export_clip(job_id, clip_dict, options)
+                job_row = s.query(Job).filter(Job.id == job_id).first()
+                source_url = job_row.source_url if job_row and job_row.source_type == "url" else None
+                export_path = export_clip(job_id, clip_dict, options, source_url=source_url)
             except Exception as exc:
                 logger.exception("export thread failed for clip %s", clip_id)
                 row = s.query(Clip).filter(Clip.id == clip_id).first()
