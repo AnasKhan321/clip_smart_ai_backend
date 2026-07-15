@@ -256,6 +256,16 @@ class MusicTrack(Base):
     user = relationship("User")
 
 
+class Template(Base):
+    __tablename__ = "templates"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid4()))
+    name = Column(String, nullable=False)
+    r2_key = Column(String, nullable=False, unique=True, index=True)
+    is_active = Column(Boolean, default=True, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+
+
 class CachedVideo(Base):
     __tablename__ = "cached_videos"
 

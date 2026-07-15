@@ -5,17 +5,20 @@ import os
 from datetime import datetime
 from typing import Optional, List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from uuid import uuid4
+
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import or_, func
 from sqlalchemy.orm import Session
 
 from database import get_db
-from models import User, CreditTransaction, AdminLog, Job, Clip, SubscriptionTier, UserSubscription
+from models import User, CreditTransaction, AdminLog, Job, Clip, SubscriptionTier, UserSubscription, Template
 from auth import require_admin, create_access_token
 from services.credits import grant, log_admin, is_dev_mode
 from services.app_settings import load_app_settings, save_app_settings
+from services import r2
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -640,3 +643,89 @@ def grant_subscription_manually(
     db.refresh(subscription)
 
     return UserSubscriptionOut.model_validate(subscription)
+
+
+# ── Templates (green-screen images) ────────────────────────────
+_TEMPLATE_MIME_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+_TEMPLATE_MAX_MB = 20
+
+
+class TemplateOut(BaseModel):
+    id: str
+    name: str
+    image_url: str
+    is_active: bool
+    created_at: datetime
+
+
+def _template_out(t: Template) -> TemplateOut:
+    return TemplateOut(
+        id=t.id, name=t.name, is_active=t.is_active, created_at=t.created_at,
+        image_url=r2.object_url(t.r2_key),
+    )
+
+
+@router.post("/templates", response_model=TemplateOut)
+async def upload_template(
+    name: str = Form(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    """Upload a green-screen template image (admin only)."""
+    if not r2.is_enabled():
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "R2 storage not configured")
+
+    ext = _TEMPLATE_MIME_EXT.get(file.content_type or "")
+    if not ext:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Image must be PNG, JPEG, or WEBP")
+
+    content = await file.read()
+    size_mb = len(content) / (1024 * 1024)
+    if size_mb > _TEMPLATE_MAX_MB:
+        raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"Image exceeds {_TEMPLATE_MAX_MB}MB limit")
+
+    template_id = str(uuid4())
+    key = r2.template_key(template_id, ext)
+    r2.upload_bytes(content, key, content_type=file.content_type)
+
+    template = Template(id=template_id, name=name, r2_key=key, is_active=True)
+    db.add(template)
+    log_admin(db, admin_user, "upload_template", target_type="template", target_id=template_id,
+              payload={"name": name})
+    db.commit()
+    db.refresh(template)
+
+    return _template_out(template)
+
+
+@router.get("/templates", response_model=List[TemplateOut])
+def list_templates(
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    templates = db.query(Template).order_by(Template.created_at.desc()).all()
+    return [_template_out(t) for t in templates]
+
+
+@router.delete("/templates/{template_id}")
+def delete_template(
+    template_id: str,
+    db: Session = Depends(get_db),
+    admin_user: User = Depends(require_admin),
+):
+    template = db.query(Template).filter(Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
+
+    if r2.is_enabled():
+        try:
+            r2.delete_object(template.r2_key)
+        except Exception:
+            pass
+
+    log_admin(db, admin_user, "delete_template", target_type="template", target_id=template_id,
+              payload={"name": template.name})
+    db.delete(template)
+    db.commit()
+    return {"deleted": template_id}

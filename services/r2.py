@@ -89,6 +89,10 @@ def clip_key(job_id: str, rank: int) -> str:
     return f"jobs/{job_id}/clips/clip_{rank:03d}.mp4"
 
 
+def template_key(template_id: str, ext: str = "png") -> str:
+    return f"templates/{template_id}.{ext}"
+
+
 # ── Presigned multipart upload ──────────────────────────────────────────────
 
 def create_multipart_upload(key: str, content_type: str = "video/mp4") -> dict:
@@ -189,6 +193,12 @@ def upload_file(local_path: str, key: str, content_type: str = "video/mp4") -> s
         ExtraArgs={"ContentType": content_type},
         Config=cfg,
     )
+    return key
+
+
+def upload_bytes(data: bytes, key: str, content_type: str = "application/octet-stream") -> str:
+    """Direct put_object for small in-memory payloads (e.g. uploaded images). Returns key."""
+    get_client().put_object(Bucket=bucket(), Key=key, Body=data, ContentType=content_type)
     return key
 
 
