@@ -645,6 +645,42 @@ def grant_subscription_manually(
     return UserSubscriptionOut.model_validate(subscription)
 
 
+class FailedJobOut(BaseModel):
+    id: str
+    user_email: Optional[str]
+    source_type: str
+    source_url: Optional[str]
+    source_filename: Optional[str]
+    stage_progress: int
+    error_message: Optional[str]
+    created_at: datetime
+
+
+@router.get("/failed-jobs", response_model=List[FailedJobOut])
+def list_failed_jobs(
+    limit: int = Query(100, le=500),
+    db: Session = Depends(get_db),
+    _admin: User = Depends(require_admin),
+):
+    rows = (
+        db.query(Job, User.email)
+        .join(User, Job.user_id == User.id, isouter=True)
+        .filter(Job.status == "failed")
+        .order_by(Job.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        FailedJobOut(
+            id=j.id, user_email=email, source_type=j.source_type,
+            source_url=j.source_url, source_filename=j.source_filename,
+            stage_progress=j.stage_progress, error_message=j.error_message,
+            created_at=j.created_at,
+        )
+        for j, email in rows
+    ]
+
+
 # ── Templates (green-screen hook overlays) ──────────────────────
 _TEMPLATE_MIME_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 _TEMPLATE_MAX_MB = 20
