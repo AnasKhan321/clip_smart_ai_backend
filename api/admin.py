@@ -645,7 +645,7 @@ def grant_subscription_manually(
     return UserSubscriptionOut.model_validate(subscription)
 
 
-# ── Templates (green-screen images) ────────────────────────────
+# ── Templates (green-screen hook overlays) ──────────────────────
 _TEMPLATE_MIME_EXT = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
 _TEMPLATE_MAX_MB = 20
 
@@ -653,6 +653,7 @@ _TEMPLATE_MAX_MB = 20
 class TemplateOut(BaseModel):
     id: str
     name: str
+    slug: str
     image_url: str
     is_active: bool
     created_at: datetime
@@ -660,7 +661,7 @@ class TemplateOut(BaseModel):
 
 def _template_out(t: Template) -> TemplateOut:
     return TemplateOut(
-        id=t.id, name=t.name, is_active=t.is_active, created_at=t.created_at,
+        id=t.id, name=t.name, slug=t.slug, is_active=t.is_active, created_at=t.created_at,
         image_url=r2.object_url(t.r2_key),
     )
 
@@ -672,7 +673,20 @@ async def upload_template(
     db: Session = Depends(get_db),
     admin_user: User = Depends(require_admin),
 ):
-    """Upload a green-screen template image (admin only)."""
+    """Upload a green-screen template image (admin only).
+
+    Runs the same green-screen detection used for the built-in hook
+    templates (scripts/build_hook_templates.py) — punches the green screen
+    area to alpha=0, saves overlay.png + meta.json locally so it's
+    immediately usable via /hook-templates, and mirrors both to R2 so a
+    redeploy (ephemeral disk) can resync it (see main.py startup sync).
+    """
+    import json
+    from io import BytesIO
+    from PIL import Image
+    from scripts.build_hook_templates import build_from_image, slugify
+    from api.hook_templates import TEMPLATES_DIR
+
     if not r2.is_enabled():
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "R2 storage not configured")
 
@@ -685,14 +699,29 @@ async def upload_template(
     if size_mb > _TEMPLATE_MAX_MB:
         raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, f"Image exceeds {_TEMPLATE_MAX_MB}MB limit")
 
-    template_id = str(uuid4())
-    key = r2.template_key(template_id, ext)
-    r2.upload_bytes(content, key, content_type=file.content_type)
+    slug = slugify(name)
+    if db.query(Template).filter(Template.slug == slug).first():
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Template '{slug}' already exists")
 
-    template = Template(id=template_id, name=name, r2_key=key, is_active=True)
+    dest_dir = TEMPLATES_DIR / slug
+    try:
+        img = Image.open(BytesIO(content))
+        meta = build_from_image(img, slug, name, dest_dir)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                             f"No green-screen region found in image: {exc}") from exc
+
+    overlay_path = dest_dir / "overlay.png"
+    key = r2.hook_template_key(slug)
+    r2.upload_file(str(overlay_path), key, content_type="image/png")
+
+    template = Template(
+        id=str(uuid4()), name=name, slug=slug, r2_key=key,
+        meta_json=json.dumps(meta), is_active=True,
+    )
     db.add(template)
-    log_admin(db, admin_user, "upload_template", target_type="template", target_id=template_id,
-              payload={"name": name})
+    log_admin(db, admin_user, "upload_template", target_type="template", target_id=template.id,
+              payload={"name": name, "slug": slug})
     db.commit()
     db.refresh(template)
 
@@ -714,6 +743,9 @@ def delete_template(
     db: Session = Depends(get_db),
     admin_user: User = Depends(require_admin),
 ):
+    import shutil
+    from api.hook_templates import TEMPLATES_DIR
+
     template = db.query(Template).filter(Template.id == template_id).first()
     if not template:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Template not found")
@@ -724,8 +756,10 @@ def delete_template(
         except Exception:
             pass
 
+    shutil.rmtree(TEMPLATES_DIR / template.slug, ignore_errors=True)
+
     log_admin(db, admin_user, "delete_template", target_type="template", target_id=template_id,
-              payload={"name": template.name})
+              payload={"name": template.name, "slug": template.slug})
     db.delete(template)
     db.commit()
     return {"deleted": template_id}

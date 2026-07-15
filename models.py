@@ -261,7 +261,9 @@ class Template(Base):
 
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     name = Column(String, nullable=False)
-    r2_key = Column(String, nullable=False, unique=True, index=True)
+    slug = Column(String, nullable=False, unique=True, index=True)
+    r2_key = Column(String, nullable=False, unique=True, index=True)  # built overlay.png in R2
+    meta_json = Column(Text, nullable=False)  # hook-template meta.json contents (video_rect, screen_quad, ...)
     is_active = Column(Boolean, default=True, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 

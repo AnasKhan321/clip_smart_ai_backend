@@ -69,14 +69,12 @@ def find_screen_quad(mask: np.ndarray) -> tuple[np.ndarray, float]:
     return corners, off_axis
 
 
-def build_one(src: Path, force: bool = False) -> None:
-    slug = slugify(src.stem)
-    dest_dir = OUT_DIR / slug
-    if (dest_dir / "meta.json").exists() and not force:
-        print(f"skip (already built): {src.name}")
-        return
-
-    img = Image.open(src).convert("RGBA")
+def build_from_image(img: Image.Image, slug: str, name: str, dest_dir: Path) -> dict:
+    """Core green-screen detection + punch, reusable for both the raw-folder
+    CLI flow and the admin upload endpoint. Writes overlay.png + meta.json
+    into dest_dir, returns the meta dict. Raises ValueError if no green
+    screen region is found."""
+    img = img.convert("RGBA")
     # libx264 requires even width/height. Real photos are whatever size the
     # camera gave them — crop 1px off if needed so every downstream ffmpeg
     # pass (scene compositing, hook overlay) always gets an even canvas.
@@ -94,9 +92,9 @@ def build_one(src: Path, force: bool = False) -> None:
 
     ratio = w / h if h else 0
     if not (1.5 < ratio < 2.0):
-        print(f"warn: {src.name} screen bbox ratio {ratio:.2f} isn't ~16:9 (got {w:.0f}x{h:.0f})")
+        print(f"warn: {slug} screen bbox ratio {ratio:.2f} isn't ~16:9 (got {w:.0f}x{h:.0f})")
     if rotated:
-        print(f"note: {src.name} screen is tilted ({off_axis_deg:.1f} deg off-axis) — "
+        print(f"note: {slug} screen is tilted ({off_axis_deg:.1f} deg off-axis) — "
               f"needs perspective-warp compositing, not simple scale+overlay")
 
     # Punch exact mask, not the bounding box — a tilted screen's bbox also
@@ -113,7 +111,7 @@ def build_one(src: Path, force: bool = False) -> None:
 
     meta = {
         "id": slug,
-        "name": src.stem.replace("_", " ").replace("-", " ").title(),
+        "name": name,
         "canvas": [img.width, img.height],
         "video_rect": [x0 / img.width, y0 / img.height, w / img.width, h / img.height],
         "screen_quad": [[round(float(px) / img.width, 5), round(float(py) / img.height, 5)] for px, py in corners],
@@ -123,6 +121,18 @@ def build_one(src: Path, force: bool = False) -> None:
     (dest_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     print(f"built: {slug}  bbox=({x0:.0f},{y0:.0f},{w:.0f},{h:.0f})  "
           f"rotated={rotated}  canvas={img.width}x{img.height}")
+    return meta
+
+
+def build_one(src: Path, force: bool = False) -> None:
+    slug = slugify(src.stem)
+    dest_dir = OUT_DIR / slug
+    if (dest_dir / "meta.json").exists() and not force:
+        print(f"skip (already built): {src.name}")
+        return
+
+    name = src.stem.replace("_", " ").replace("-", " ").title()
+    build_from_image(Image.open(src), slug, name, dest_dir)
 
 
 def build_all(force: bool = False) -> None:

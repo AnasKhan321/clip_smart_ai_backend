@@ -44,6 +44,7 @@ async def lifespan(app: FastAPI):
     # last deploy — every push restarts the server, so this is the natural
     # place to pick them up without a separate watcher process.
     _build_hook_templates()
+    _sync_admin_templates()
     yield
 
 
@@ -55,6 +56,37 @@ def _build_hook_templates() -> None:
         build_all()
     except Exception:
         logger.exception("hook template build failed (continuing startup)")
+
+
+def _sync_admin_templates() -> None:
+    """Admin-uploaded templates (api/admin.py) live on ephemeral disk once
+    built — a redeploy wipes them. Re-download overlay.png from R2 + rewrite
+    meta.json from the DB row for any Template missing locally."""
+    import logging
+    from database import SessionLocal
+    from models import Template
+    from services import r2
+    from api.hook_templates import TEMPLATES_DIR
+    logger = logging.getLogger(__name__)
+    if not r2.is_enabled():
+        return
+    s = SessionLocal()
+    try:
+        for t in s.query(Template).all():
+            dest_dir = TEMPLATES_DIR / t.slug
+            meta_path = dest_dir / "meta.json"
+            if meta_path.exists():
+                continue
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                r2.download_file(t.r2_key, str(dest_dir / "overlay.png"))
+                meta_path.write_text(t.meta_json)
+            except Exception:
+                logger.exception("failed to resync template %s from R2", t.slug)
+    except Exception:
+        logger.exception("admin template resync failed (continuing startup)")
+    finally:
+        s.close()
 
 
 def _reset_stale_exports() -> None:

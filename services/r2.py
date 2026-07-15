@@ -93,6 +93,10 @@ def template_key(template_id: str, ext: str = "png") -> str:
     return f"templates/{template_id}.{ext}"
 
 
+def hook_template_key(slug: str) -> str:
+    return f"templates/hooks/{slug}/overlay.png"
+
+
 # ── Presigned multipart upload ──────────────────────────────────────────────
 
 def create_multipart_upload(key: str, content_type: str = "video/mp4") -> dict:
