@@ -58,6 +58,16 @@ def download_video(url: str, job_id: str, progress_callback=None,
     return {**meta, "video_path": video_path_abs, "audio_path": str(audio_path)}
 
 
+def _normalize_download_service_error(status_code: int, body: str) -> str:
+    snippet = (body or "").strip().lower()
+    if status_code >= 500 or "<!doctype html" in snippet or "<html" in snippet:
+        return (
+            f"Download service is temporarily unavailable (HTTP {status_code}). "
+            "Please download the video manually and upload the file directly."
+        )
+    return f"Download service error {status_code}: {(body or '')[:300]}"
+
+
 def _pick_proxy() -> str:
     """Pick a random proxy from WEBSHARE_PROXY_LIST (newline or comma-separated).
     Each entry: host:port:user:pass  OR  host:port (uses WEBSHARE_USER/PASS).
@@ -176,7 +186,7 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
     # Submit async download job
     resp = httpx.post(f"{base}/download", json=payload, headers=headers, timeout=30)
     if resp.status_code != 200:
-        raise RuntimeError(f"Download service error {resp.status_code}: {resp.text[:300]}")
+        raise RuntimeError(_normalize_download_service_error(resp.status_code, resp.text))
 
     task_id = resp.json()["task_id"]
     print(f"[downloader] mac-service task_id={task_id}", flush=True)
@@ -206,7 +216,10 @@ def _download_via_mac_service(source_url: str, job_id: str, job_dir: Path, svc_u
         if st == "done":
             break
         if st == "error":
-            raise RuntimeError(f"Download service failed: {data.get('error')}")
+            err = (data.get("error") or "").strip()
+            if err:
+                raise RuntimeError(err)
+            raise RuntimeError("Download service failed. Please try again or upload the file directly.")
     else:
         raise RuntimeError("Download service timed out after 15 minutes")
 
