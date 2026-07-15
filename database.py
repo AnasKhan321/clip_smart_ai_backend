@@ -56,6 +56,8 @@ _PENDING_COLUMNS = [
     ("users", "referral_code", "VARCHAR"),
     ("users", "referred_by_user_id", "VARCHAR"),
     ("jobs", "thumbnail_url", "VARCHAR"),
+    ("templates", "slug", "VARCHAR"),
+    ("templates", "meta_json", "TEXT"),
 ]
 
 
@@ -81,3 +83,8 @@ def _apply_lightweight_migrations():
                 conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_referral_code ON users (referral_code)"))
             if "ix_users_referred_by_user_id" not in indexes:
                 conn.execute(text("CREATE INDEX IF NOT EXISTS ix_users_referred_by_user_id ON users (referred_by_user_id)"))
+
+        if insp.has_table("templates"):
+            indexes = {idx["name"] for idx in insp.get_indexes("templates")}
+            if "ix_templates_slug" not in indexes:
+                conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_templates_slug ON templates (slug)"))
