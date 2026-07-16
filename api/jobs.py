@@ -180,6 +180,20 @@ def abort_upload(body: AbortUploadIn, user: User = Depends(get_current_user)):
     return {"ok": True}
 
 
+class ParseSkipsIn(BaseModel):
+    text: str = Field(max_length=4000)
+    duration: Optional[float] = None
+
+
+@router.post("/jobs/parse-skips")
+def parse_skips(body: ParseSkipsIn, user: User = Depends(get_current_user)):
+    """Freeform pasted timestamps -> cleaned skip ranges. Never raises on bad
+    input; unparseable text comes back as warnings with zero ranges."""
+    from services.skip_parser import parse_skip_text
+
+    return parse_skip_text(body.text, body.duration)
+
+
 @router.post("/jobs/from-r2")
 def create_job_from_r2(
     body: JobFromR2In,
